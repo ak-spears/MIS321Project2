@@ -1,0 +1,58 @@
+# Required Tech Stack
+ 
+This project must use only the following stack:
+ 
+- Frontend: exactly one HTML file, CSS, and vanilla JavaScript, with Bootstrap allowed for styling only
+- Backend: ASP.NET Core Web API (`dotnet`), C#
+- Database: MySQL
+ 
+# Frontend Constraints
+ 
+- Use plain `.html`, `.css`, and `.js` files
+- Maintain a single HTML entry file for the frontend (no multi-page HTML architecture)
+- Drive UI/content/state transitions through JavaScript DOM updates
+- Do not rely on server-rendered page transitions or additional HTML files for feature flows
+- Bootstrap is allowed strictly for styling/layout via CSS classes and optional Bootstrap JS utilities
+- Do not introduce frontend frameworks or component libraries beyond Bootstrap styling (e.g., React, Vue, Angular, Svelte, Next.js, Nuxt)
+- Do not introduce frontend package managers or bundlers for app code (e.g., npm-based SPA tooling, Vite, Webpack, Parcel)
+- Prefer browser-native APIs (`fetch`, `addEventListener`, `classList`, `localStorage`) and progressive enhancement patterns
+ 
+# Backend Constraints
+ 
+- Use ASP.NET Core Web API for all server endpoints
+- Keep backend logic in C# project(s) managed by `dotnet`
+- Do not use ORMs (e.g., Entity Framework, Dapper-style ORM mapping abstractions)
+- Access MySQL with direct SQL queries/commands you write explicitly
+- Keep SQL visible and reviewable in the backend codebase (no hidden query generation layers)
+- Do not introduce alternative backend runtimes/frameworks (e.g., Node/Express, Django, Rails, Spring)
+ 
+# Database Constraints
+ 
+- Use MySQL as the primary relational database
+- Use MySQL-compatible schema, SQL dialect, and connection configuration
+- Do not switch to other primary databases (e.g., PostgreSQL, SQL Server, MongoDB) unless explicitly requested
+ 
+# Dependency Policy
+ 
+- No new packages/frameworks that conflict with this stack policy
+- If a proposed change requires tooling outside this stack, stop and ask for explicit approval first
+ 
+# Quick Examples
+ 
+```text
+Allowed:
+- single `index.html` + styles.css + app.js
+- Bootstrap CSS classes for layout/components and optional Bootstrap JS utilities
+- JavaScript-driven view updates (show/hide sections, render lists/forms, update content dynamically)
+- ASP.NET Core controllers/minimal APIs in C#
+- MySQL tables and hand-written SQL queries in backend data access code
+ 
+Not allowed:
+- Multiple HTML pages for app feature flows
+- Feature behavior implemented by manual HTML page swapping instead of JS-driven rendering
+- Entity Framework or other ORM-based data access
+- Auto-generated/implicit query layers instead of explicit SQL
+- React + Vite frontend
+- Express.js backend
+- PostgreSQL migration
+```

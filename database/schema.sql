@@ -1,0 +1,1 @@
+-- Campus Dorm Marketplace MySQL schema definitions go here.
