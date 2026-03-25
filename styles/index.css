@@ -1,0 +1,69 @@
+:root {
+	--bg: #0b1020;
+	--surface: #121933;
+	--surface-soft: #1c2650;
+	--text: #e7ecff;
+	--muted: #9fb0e8;
+}
+
+body {
+	min-height: 100vh;
+	background: radial-gradient(circle at top, #1a2757 0%, var(--bg) 55%);
+	color: var(--text);
+}
+
+.hero-card,
+.chat-shell {
+	background: rgba(18, 25, 51, 0.85);
+	border: 1px solid rgba(159, 176, 232, 0.2);
+	border-radius: 1rem;
+	backdrop-filter: blur(4px);
+}
+
+.hero-card p,
+.hero-card .lead {
+	color: var(--muted);
+}
+
+.chat-history {
+	height: 380px;
+	overflow-y: auto;
+	padding: 0.75rem;
+	background: var(--surface-soft);
+	border-radius: 0.75rem;
+	border: 1px solid rgba(159, 176, 232, 0.18);
+}
+
+.chat-message {
+	max-width: 85%;
+	padding: 0.65rem 0.8rem;
+	border-radius: 0.75rem;
+	margin-bottom: 0.6rem;
+	line-height: 1.4;
+	white-space: pre-wrap;
+}
+
+.chat-message.user {
+	margin-left: auto;
+	background: #3347a8;
+}
+
+.chat-message.assistant {
+	margin-right: auto;
+	background: #222f63;
+}
+
+.chat-form .form-control {
+	background: #0f1734;
+	color: var(--text);
+	border-color: #2f3f82;
+}
+
+.chat-form .form-control::placeholder {
+	color: #8a9ad5;
+}
+
+.chat-form .form-control:focus {
+	box-shadow: 0 0 0 0.2rem rgba(100, 127, 255, 0.25);
+	border-color: #6f8dff;
+}
