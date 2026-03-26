@@ -1,28 +1,21 @@
-IF DB_ID('FullstackWithLlmDb') IS NULL
-BEGIN
-    CREATE DATABASE FullstackWithLlmDb;
-END
-GO
+-- IMPORTANT:
+-- On Heroku, the actual database/schema name is part of the connection string
+-- (ex: Database=gmor3jzcesyzblnn). So this script should ONLY create tables
+-- in the currently-selected schema/database.
 
-USE FullstackWithLlmDb;
-GO
+CREATE TABLE IF NOT EXISTS Products
+(
+    Id INT NOT NULL AUTO_INCREMENT,
+    Name VARCHAR(120) NOT NULL,
+    Price DECIMAL(10,2) NOT NULL,
+    PRIMARY KEY (Id)
+);
 
-IF OBJECT_ID('dbo.Products', 'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.Products
-    (
-        Id INT IDENTITY(1,1) PRIMARY KEY,
-        Name NVARCHAR(120) NOT NULL,
-        Price DECIMAL(10,2) NOT NULL
-    );
-END
-GO
+-- Seed demo rows if missing
+INSERT INTO Products (Name, Price)
+SELECT 'Model Y Charger', 249.99
+WHERE NOT EXISTS (SELECT 1 FROM Products WHERE Name = 'Model Y Charger' LIMIT 1);
 
-IF NOT EXISTS (SELECT 1 FROM dbo.Products)
-BEGIN
-    INSERT INTO dbo.Products (Name, Price)
-    VALUES
-        ('Model Y Charger', 249.99),
-        ('Home EV Adapter', 129.50);
-END
-GO
+INSERT INTO Products (Name, Price)
+SELECT 'Home EV Adapter', 129.50
+WHERE NOT EXISTS (SELECT 1 FROM Products WHERE Name = 'Home EV Adapter' LIMIT 1);
