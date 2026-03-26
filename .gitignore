@@ -1,7 +1,9 @@
 .env
 .env.*
 
-bin/
-obj/
+# Build outputs
 **/bin/
 **/obj/
+
+# OS
+.DS_Store
