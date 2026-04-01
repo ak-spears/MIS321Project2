@@ -7,7 +7,9 @@
     --cdm-panel: #ffffff;
     --cdm-muted: #6b7280;
     --cdm-border: #e5e7eb;
-    --cdm-shadow: 0 8px 24px rgba(17, 24, 39, 0.08);
+    --cdm-shadow: 0 10px 30px rgba(17, 24, 39, 0.08);
+    --cdm-radius: 16px;
+    --cdm-radius-lg: 20px;
     --cdm-ink: #0b0f19;
 }
 
@@ -19,6 +21,10 @@ body {
 body {
     background: var(--cdm-bg);
     color: #111827;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+        "Apple Color Emoji", "Segoe UI Emoji";
+    font-weight: 400;
+    line-height: 1.55;
 }
 
 .cdm-max {
@@ -36,6 +42,26 @@ body {
     color: #fff !important;
 }
 
+.cdm-topbar .navbar-brand {
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.cdm-topbar .nav-link {
+    font-weight: 500;
+    font-size: 0.95rem;
+    padding-top: 0.55rem;
+    padding-bottom: 0.55rem;
+    opacity: 0.95;
+    border-radius: 999px;
+    transition: background-color 120ms ease, opacity 120ms ease;
+}
+
+.cdm-topbar .nav-link:hover {
+    background: rgba(255, 255, 255, 0.14);
+    opacity: 1;
+}
+
 .cdm-navbar-top {
     position: sticky;
     top: 0;
@@ -46,20 +72,26 @@ body {
     min-height: 100%;
 }
 
+.cdm-auth-modal {
+    border: 1px solid var(--cdm-border);
+    border-radius: var(--cdm-radius);
+    box-shadow: var(--cdm-shadow);
+}
+
 .cdm-page {
     max-width: 1200px;
 }
 
 .cdm-body-content {
-    padding: 1.25rem 0 2.5rem;
+    padding: 1.5rem 0 3rem;
 }
 
 .cdm-section {
-    padding: 4rem 0;
+    padding: 4.5rem 0;
 }
 
 .cdm-section--tight {
-    padding: 3rem 0;
+    padding: 3.25rem 0;
 }
 
 .cdm-band {
@@ -84,18 +116,21 @@ body {
 
 .cdm-title {
     letter-spacing: -0.02em;
+    font-weight: 600;
 }
 
 .cdm-subtitle {
     max-width: 60ch;
+    font-weight: 400;
+    line-height: 1.55;
 }
 
 .cdm-surface {
     background: rgba(255, 255, 255, 0.75);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(229, 231, 235, 0.75);
-    border-radius: 16px;
-    box-shadow: var(--cdm-shadow);
+    border-radius: var(--cdm-radius);
+    box-shadow: 0 18px 45px rgba(17, 24, 39, 0.09);
 }
 
 .cdm-logo-wall {
@@ -124,8 +159,15 @@ body {
 }
 
 .cdm-feature-card {
-    border-radius: 18px;
+    border-radius: var(--cdm-radius-lg);
     padding: 1.25rem;
+    box-shadow: 0 12px 40px rgba(17, 24, 39, 0.06);
+    transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.cdm-feature-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 55px rgba(17, 24, 39, 0.09);
 }
 
 .cdm-icon {
@@ -148,10 +190,11 @@ body {
 }
 
 .cdm-quote {
-    border-radius: 18px;
+    border-radius: var(--cdm-radius-lg);
     padding: 1.25rem;
     border: 1px solid rgba(229, 231, 235, 0.85);
     background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 14px 40px rgba(17, 24, 39, 0.06);
 }
 
 .cdm-footer a {
@@ -166,7 +209,15 @@ body {
 .cdm-card {
     background: var(--cdm-panel);
     border: 1px solid var(--cdm-border);
-    border-radius: 12px;
+    border-radius: var(--cdm-radius);
+    box-shadow: 0 12px 35px rgba(17, 24, 39, 0.06);
+    transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.cdm-card:hover {
+    border-color: rgba(158, 27, 50, 0.22);
+    box-shadow: 0 16px 50px rgba(17, 24, 39, 0.08);
+    transform: translateY(-1px);
 }
 
 .cdm-section-title {
@@ -175,6 +226,7 @@ body {
     text-transform: uppercase;
     color: var(--cdm-muted);
     margin: 1rem 0 0.5rem;
+    font-weight: 650;
 }
 
 .cdm-nav a {
@@ -193,8 +245,10 @@ body {
     padding: 0.2rem 0.5rem;
     border-radius: 999px;
     font-size: 0.75rem;
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.26);
+    background: rgba(255, 255, 255, 0.14);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    font-weight: 600;
 }
 
 .cdm-muted {
@@ -209,9 +263,15 @@ body {
     border-radius: 999px;
 }
 
+#signup-dorm {
+    /* Override pill/oval styling from `.cdm-input` so the listbox stays rectangular. */
+    border-radius: 0.5rem !important;
+    overflow-y: auto;
+}
+
 .cdm-chip {
-    border: 1px solid var(--cdm-border);
-    background: #fff;
+    border: 1px solid rgba(17, 24, 39, 0.08);
+    background: rgba(255, 255, 255, 0.92);
     color: #111827;
     border-radius: 999px;
     padding: 0.35rem 0.7rem;
@@ -220,33 +280,48 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
+    box-shadow: 0 10px 25px rgba(17, 24, 39, 0.06);
+    font-weight: 520;
+    transition: transform 120ms ease, background-color 120ms ease, box-shadow 120ms ease,
+        border-color 120ms ease;
 }
 
 .cdm-chip:hover {
-    border-color: #d1d5db;
-    background: #f9fafb;
+    border-color: rgba(158, 27, 50, 0.22);
+    background: rgba(158, 27, 50, 0.06);
+    transform: translateY(-1px);
+    box-shadow: 0 14px 35px rgba(17, 24, 39, 0.08);
 }
 
 .cdm-btn-crimson {
     background: var(--cdm-crimson);
     border-color: var(--cdm-crimson);
     color: #fff;
+    border-radius: 14px;
+    box-shadow: 0 12px 35px rgba(158, 27, 50, 0.25);
+    transition: transform 120ms ease, box-shadow 120ms ease, background-color 120ms ease,
+        border-color 120ms ease;
 }
 
 .cdm-btn-crimson:hover {
     background: var(--cdm-crimson-dark);
     border-color: var(--cdm-crimson-dark);
     color: #fff;
+    transform: translateY(-1px);
+    box-shadow: 0 18px 55px rgba(158, 27, 50, 0.3);
 }
 
 .cdm-listing-card {
     overflow: hidden;
     transition: transform 120ms ease, box-shadow 120ms ease;
+    border-radius: var(--cdm-radius);
+    background: #fff;
+    box-shadow: 0 12px 35px rgba(17, 24, 39, 0.06);
 }
 
 .cdm-listing-card:hover {
     transform: translateY(-2px);
-    box-shadow: var(--cdm-shadow);
+    box-shadow: 0 18px 55px rgba(17, 24, 39, 0.09);
 }
 
 .cdm-listing-thumb {
@@ -258,6 +333,9 @@ body {
 .cdm-kicker {
     color: var(--cdm-muted);
     font-size: 0.85rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    line-height: 1.35;
 }
 
 .cdm-rail {
@@ -265,15 +343,22 @@ body {
     top: 86px;
 }
 
+.cdm-rail .cdm-card {
+    border-radius: var(--cdm-radius);
+    box-shadow: 0 12px 35px rgba(17, 24, 39, 0.06);
+    border-color: rgba(229, 231, 235, 0.95);
+}
+
 .cdm-filter-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.5rem 0.6rem;
-    border-radius: 10px;
-    border: 1px solid var(--cdm-border);
-    background: #fff;
-    font-size: 0.9rem;
+    padding: 0.65rem 0.8rem;
+    border-radius: 12px;
+    border: 1px solid rgba(17, 24, 39, 0.06);
+    background: #fbfbfc;
+    font-size: 0.92rem;
+    transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
 
 .cdm-filter-item + .cdm-filter-item {
@@ -281,7 +366,9 @@ body {
 }
 
 .cdm-filter-item:hover {
-    background: #f9fafb;
+    background: #f6f7f9;
+    border-color: rgba(158, 27, 50, 0.18);
+    transform: translateY(-1px);
 }
 
 .cdm-linklist a {
@@ -290,13 +377,15 @@ body {
     justify-content: space-between;
     gap: 0.75rem;
     padding: 0.55rem 0.75rem;
-    border-radius: 10px;
+    border-radius: 12px;
     text-decoration: none;
     color: #111827;
+    transition: background-color 120ms ease, transform 120ms ease;
 }
 
 .cdm-linklist a:hover {
-    background: #f9fafb;
+    background: #f6f7f9;
+    transform: translateY(-1px);
 }
 
 .cdm-linklist .cdm-linkmeta {
