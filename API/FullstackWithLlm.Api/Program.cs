@@ -18,6 +18,7 @@ DatabaseUrlResolver.ApplyIfNeeded(builder.Configuration);
 builder.Services.AddControllers();
 builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();
+builder.Services.AddScoped<ListingRepository>();
 builder.Services.AddSingleton<JwtTokenService>();
 
 var jwtKey = builder.Configuration["Jwt:SigningKey"];

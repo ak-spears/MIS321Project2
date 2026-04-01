@@ -7,50 +7,6 @@ public sealed class UserRepository
 {
     private readonly string _connectionString;
 
-    private static async Task EnsureUsersTableAsync(MySqlConnection connection)
-    {
-        const string sql = """
-            CREATE TABLE IF NOT EXISTS Users
-            (
-                Id INT NOT NULL AUTO_INCREMENT,
-                Email VARCHAR(255) NOT NULL,
-                PasswordHash VARCHAR(255) NOT NULL,
-                Phone VARCHAR(40) NOT NULL,
-                LivesOnCampus TINYINT(1) NOT NULL,
-                MoveDate DATE NOT NULL,
-                MoveOutDate DATE NULL,
-                DormBuilding VARCHAR(120) NULL,
-                SuiteLetter CHAR(1) NULL,
-                CreatedAtUtc DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP()),
-                PRIMARY KEY (Id),
-                UNIQUE KEY UX_Users_Email (Email)
-            );
-            """;
-
-        await using var cmd = new MySqlCommand(sql, connection);
-        await cmd.ExecuteNonQueryAsync();
-
-        // If Users was created previously without MoveOutDate, add it without failing.
-        const string checkSql = """
-            SELECT COUNT(*)
-            FROM information_schema.columns
-            WHERE table_schema = DATABASE()
-              AND table_name = 'Users'
-              AND column_name = 'MoveOutDate';
-            """;
-
-        await using var checkCmd = new MySqlCommand(checkSql, connection);
-        var countObj = await checkCmd.ExecuteScalarAsync();
-        var count = Convert.ToInt32(countObj);
-
-        if (count == 0)
-        {
-            const string alterSql = "ALTER TABLE Users ADD COLUMN MoveOutDate DATE NULL;";
-            await using var alterCmd = new MySqlCommand(alterSql, connection);
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-    }
-
     public UserRepository(IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("DefaultConnection");
@@ -63,18 +19,51 @@ public sealed class UserRepository
         _connectionString = connectionString;
     }
 
+    private static string DisplayNameFromEmail(string email)
+    {
+        var trimmed = email.Trim();
+        var at = trimmed.IndexOf('@');
+        var local = at > 0 ? trimmed[..at] : trimmed;
+        if (local.Length > 60)
+        {
+            local = local[..60];
+        }
+
+        return string.IsNullOrEmpty(local) ? "User" : local;
+    }
+
+    private static async Task<int> GetDefaultCampusIdAsync(MySqlConnection connection)
+    {
+        const string sql = """
+            SELECT campus_id
+            FROM campuses
+            ORDER BY campus_id
+            LIMIT 1;
+            """;
+
+        await using var cmd = new MySqlCommand(sql, connection);
+        var obj = await cmd.ExecuteScalarAsync();
+        if (obj is null || obj is DBNull)
+        {
+            throw new InvalidOperationException(
+                "No campus row found. Run database/marketplace_schema.sql (seed inserts University of Alabama).");
+        }
+
+        return Convert.ToInt32(obj);
+    }
+
     public async Task<User?> GetByEmailAsync(string email)
     {
         var normalized = email.Trim().ToLowerInvariant();
 
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync();
-        await EnsureUsersTableAsync(connection);
 
         const string sql = """
-            SELECT Id, Email, PasswordHash, Phone, LivesOnCampus, MoveDate, MoveOutDate, DormBuilding, SuiteLetter
-            FROM Users
-            WHERE Email = @Email
+            SELECT user_id, campus_id, email, password_hash, display_name, phone, lives_on_campus,
+                   move_in_date, move_out_date, dorm_building, suite_letter
+            FROM users
+            WHERE email = @Email
             LIMIT 1;
             """;
 
@@ -87,11 +76,11 @@ public sealed class UserRepository
             return null;
         }
 
-        string? dorm = reader.IsDBNull(7) ? null : reader.GetString(7);
+        string? dorm = reader.IsDBNull(9) ? null : reader.GetString(9);
         char? suite = null;
-        if (!reader.IsDBNull(8))
+        if (!reader.IsDBNull(10))
         {
-            var s = reader.GetString(8);
+            var s = reader.GetString(10);
             if (s.Length > 0)
             {
                 suite = char.ToUpperInvariant(s[0]);
@@ -101,13 +90,15 @@ public sealed class UserRepository
         return new User
         {
             Id = reader.GetInt32(0),
-            Email = reader.GetString(1),
-            PasswordHash = reader.GetString(2),
-            Phone = reader.GetString(3),
-            LivesOnCampus = reader.GetBoolean(4),
-            MoveDate = reader.GetDateTime(5),
-            MoveOutDate = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-            DormBuilding = reader.IsDBNull(7) ? null : reader.GetString(7),
+            CampusId = reader.GetInt32(1),
+            Email = reader.GetString(2),
+            PasswordHash = reader.GetString(3),
+            DisplayName = reader.GetString(4),
+            Phone = reader.GetString(5),
+            LivesOnCampus = reader.GetBoolean(6),
+            MoveDate = reader.GetDateTime(7),
+            MoveOutDate = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+            DormBuilding = dorm,
             SuiteLetter = suite,
         };
     }
@@ -124,23 +115,33 @@ public sealed class UserRepository
         char? suiteLetter)
     {
         var normalizedEmail = email.Trim().ToLowerInvariant();
+        var displayName = DisplayNameFromEmail(normalizedEmail);
 
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync();
-        await EnsureUsersTableAsync(connection);
+
+        var campusId = await GetDefaultCampusIdAsync(connection);
 
         const string insertSql = """
-            INSERT INTO Users (Email, PasswordHash, Phone, LivesOnCampus, MoveDate, MoveOutDate, DormBuilding, SuiteLetter)
-            VALUES (@Email, @PasswordHash, @Phone, @LivesOnCampus, @MoveDate, @MoveOutDate, @DormBuilding, @SuiteLetter);
+            INSERT INTO users (
+                campus_id, email, password_hash, display_name, phone, lives_on_campus,
+                move_in_date, move_out_date, dorm_building, suite_letter
+            )
+            VALUES (
+                @CampusId, @Email, @PasswordHash, @DisplayName, @Phone, @LivesOnCampus,
+                @MoveInDate, @MoveOutDate, @DormBuilding, @SuiteLetter
+            );
             """;
 
         await using (var command = new MySqlCommand(insertSql, connection))
         {
+            command.Parameters.AddWithValue("@CampusId", campusId);
             command.Parameters.AddWithValue("@Email", normalizedEmail);
             command.Parameters.AddWithValue("@PasswordHash", passwordHash);
+            command.Parameters.AddWithValue("@DisplayName", displayName);
             command.Parameters.AddWithValue("@Phone", phone.Trim());
             command.Parameters.AddWithValue("@LivesOnCampus", livesOnCampus);
-            command.Parameters.AddWithValue("@MoveDate", moveDate.Date);
+            command.Parameters.AddWithValue("@MoveInDate", moveDate.Date);
             command.Parameters.AddWithValue("@MoveOutDate", moveOutDate.Date);
             command.Parameters.AddWithValue("@DormBuilding", string.IsNullOrWhiteSpace(dormBuilding) ? DBNull.Value : dormBuilding.Trim());
             if (suiteLetter is null)
