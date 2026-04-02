@@ -14,6 +14,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Heroku add-ons often expose mysql:// only as DATABASE_URL / JAWSDB_URL; .env can mirror that for local dotnet run.
 DatabaseUrlResolver.ApplyIfNeeded(builder.Configuration);
+LocalDevConnectionStringFix.Apply(builder);
 
 builder.Services.AddControllers();
 builder.Services.AddScoped<ProductRepository>();
@@ -76,15 +77,19 @@ app.UseExceptionHandler(errorApp =>
         var feature = context.Features.Get<IExceptionHandlerFeature>();
         var ex = feature?.Error;
 
-        if (ex is MySqlException)
+        if (ex is MySqlException mx)
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            var baseDetail =
+                "Could not connect to MySQL. Check ConnectionStrings__DefaultConnection in .env, or DATABASE_URL / JAWSDB_URL "
+                + "(mysql://… from Heroku). For AWS RDS, allow inbound TCP 3306 from your public IP in the RDS security group. ";
+            var detail = app.Environment.IsDevelopment()
+                ? baseDetail + $"[{mx.ErrorCode}] {mx.Message}"
+                : baseDetail.TrimEnd();
             await context.Response.WriteAsJsonAsync(new
             {
                 title = "Database unavailable",
-                detail =
-                    "Could not connect to MySQL. Check ConnectionStrings__DefaultConnection in .env, or DATABASE_URL / JAWSDB_URL "
-                    + "(mysql://… from Heroku). Ensure your DB plan allows connections from your machine if you run the API locally.",
+                detail,
             });
             return;
         }
