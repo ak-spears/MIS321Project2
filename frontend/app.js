@@ -20,16 +20,32 @@ function setStoredToken(token) {
 }
 
 const LISTINGS_STORAGE_KEY = "cdm_my_listings_v1";
+/** Local-only checkout / claim history until API persists transactions. */
+const TRANSACTIONS_STORAGE_KEY = "cdm_transactions_v1";
+
+/** On paid listings, CDM collects a 7% marketplace fee from sale proceeds (buyer pays list price only). */
+const PLATFORM_FEE_RATE = 0.07;
 
 const state = {
     apiHealth: { status: "unknown" },
     token: getStoredToken(),
     authEmail: null,
-    /** @type {'home' | 'post' | 'my-listings' | 'listing'} */
+    /** @type {'home' | 'post' | 'my-listings' | 'listing' | 'checkout' | 'checkout-success' | 'transactions'} */
     view: "home",
     listingKey: null,
     /** @type {string | null} */
     editingListingId: null,
+    /**
+     * Checkout context (set when buyer clicks Buy / Claim).
+     * @type {null | { key: string, title: string, price: number, sellerDisplayName: string, imageUrl?: string | null, listingId?: number | null, gapSolution?: string | null, pickupStart?: string | null, pickupEnd?: string | null }}
+     */
+    checkoutContext: null,
+    /** After confirm — shown before Transactions. */
+    checkoutSuccess: null,
+    /** Transactions page: `all` | `action`. */
+    txFilter: "all",
+    /** Set while viewing a listing so Buy/Claim can open checkout. */
+    lastListingCheckoutSnap: null,
 };
 
 (function hydrateEmailFromJwt() {
@@ -176,6 +192,144 @@ function removeListing(id) {
     localStorage.setItem(LISTINGS_STORAGE_KEY, JSON.stringify(list));
 }
 
+function loadLocalTransactions() {
+    try {
+        const raw = localStorage.getItem(TRANSACTIONS_STORAGE_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+    } catch {
+        return [];
+    }
+}
+
+function saveLocalTransaction(entry) {
+    const list = loadLocalTransactions();
+    list.unshift(entry);
+    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
+    return entry;
+}
+
+function clearLocalTransactions() {
+    localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
+}
+
+function transactionStatusLabel(status) {
+    const s = String(status || "").toLowerCase();
+    if (s === "awaiting_chat") return "Next: message seller";
+    if (s === "completed") return "Completed";
+    if (s === "cancelled") return "Cancelled";
+    return status || "In progress";
+}
+
+/** Big friendly status line (CDM ≠ corporate order copy). */
+function transactionStatusHeadline(status, kind) {
+    const s = String(status || "").toLowerCase();
+    const isPurchase = kind === "purchase";
+    if (s === "awaiting_chat") {
+        return isPurchase
+            ? "Message them: lock in pickup &amp; payment"
+            : "Message them: schedule pickup (it’s free)";
+    }
+    if (s === "completed") return "You’re good. Enjoy the dorm win";
+    if (s === "cancelled") return "This one didn’t happen";
+    return "In progress";
+}
+
+function formatRelativeTimeShort(iso) {
+    try {
+        const d = new Date(iso);
+        const t = d.getTime();
+        if (Number.isNaN(t)) return "";
+        const diff = Date.now() - t;
+        const mins = Math.floor(diff / 60000);
+        if (mins < 1) return "just now";
+        if (mins < 60) return `${mins}m ago`;
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return `${hrs}h ago`;
+        const days = Math.floor(hrs / 24);
+        if (days < 7) return `${days}d ago`;
+        return "";
+    } catch {
+        return "";
+    }
+}
+
+const TX_THUMB_EMOJI = ["📦", "🛏️", "🧊", "💡", "📚", "🪑", "🎒", "🧺"];
+
+function transactionThumbEmoji(title) {
+    const str = String(title || "item");
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h + str.charCodeAt(i)) % 997;
+    return TX_THUMB_EMOJI[h % TX_THUMB_EMOJI.length];
+}
+
+function formatUsd(amount) {
+    const n = Number(amount);
+    if (!Number.isFinite(n)) return "—";
+    return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+}
+
+function platformFeeFromSale(price) {
+    const p = Number(price);
+    if (!Number.isFinite(p) || p <= 0) return 0;
+    return Math.round(p * PLATFORM_FEE_RATE * 100) / 100;
+}
+
+function sellerNetFromSale(price) {
+    const p = Number(price);
+    if (!Number.isFinite(p) || p <= 0) return 0;
+    return Math.round((p - platformFeeFromSale(p)) * 100) / 100;
+}
+
+/** Demo cards use `priceLabel` like "Free" or "$60". */
+function parseUsdFromPriceLabel(priceLabel) {
+    const s = String(priceLabel || "").trim().toLowerCase();
+    if (!s || s === "free") return 0;
+    const m = String(priceLabel).match(/[\d.]+/);
+    if (!m) return 0;
+    const n = Number(m[0]);
+    return Number.isFinite(n) ? n : 0;
+}
+
+/** Pickup-window urgency when seller set an end date (local drafts / future API). */
+function formatCheckoutPickupUrgencyHtml(ctx) {
+    if (!ctx || ctx.gapSolution !== "pickup_window" || !ctx.pickupEnd) return "";
+    const d = new Date(ctx.pickupEnd);
+    if (Number.isNaN(d.getTime())) return "";
+    const long = d.toLocaleDateString(undefined, { dateStyle: "long" });
+    return `<div class="cdm-checkout-urgency alert alert-warning py-2 px-3 small mb-0" role="status">
+        Pickup window ends <strong>${escapeHtml(long)}</strong>. Lock in a time with the seller so you don’t miss it.
+    </div>`;
+}
+
+function checkoutProgressHtml(phase, centered = false) {
+    const review = phase === "review" ? "is-active" : "is-complete";
+    const confirm = phase === "review" ? "is-upcoming" : "is-complete";
+    const chat = phase === "success" ? "is-next" : "is-upcoming";
+    const line1 = phase === "review" ? "" : "is-complete";
+    const line2 = phase === "success" ? "is-complete" : "";
+    const mx = centered ? " mx-auto" : "";
+    return `
+        <div class="cdm-checkout-progress mb-4${mx}" aria-label="Checkout steps">
+            <div class="cdm-checkout-progress-col">
+                <span class="cdm-checkout-progress-dot ${review}" aria-hidden="true"></span>
+                <span class="cdm-checkout-progress-label">Review</span>
+            </div>
+            <div class="cdm-checkout-progress-connector ${line1}" aria-hidden="true"></div>
+            <div class="cdm-checkout-progress-col">
+                <span class="cdm-checkout-progress-dot ${confirm}" aria-hidden="true"></span>
+                <span class="cdm-checkout-progress-label">Confirm</span>
+            </div>
+            <div class="cdm-checkout-progress-connector ${line2}" aria-hidden="true"></div>
+            <div class="cdm-checkout-progress-col">
+                <span class="cdm-checkout-progress-dot ${chat}" aria-hidden="true"></span>
+                <span class="cdm-checkout-progress-label">Chat</span>
+            </div>
+        </div>
+    `;
+}
+
 function escapeHtml(str) {
     if (str == null || str === "") return "";
     return String(str)
@@ -225,6 +379,9 @@ const SAMPLE_HOME_FEED = [
         title: "Mini-fridge (3.1 cu ft)",
         blurb: "92% match — fits your room type · pickup May 5–10",
         priceLabel: "$60",
+        gapSolution: "pickup_window",
+        pickupStart: "2026-05-05",
+        pickupEnd: "2026-05-10",
     },
     {
         id: "sample-3",
@@ -368,12 +525,28 @@ async function buildHomeFeedRowsHtml() {
 
 function navigate(view) {
     state.view = view;
+    if (view !== "checkout-success") {
+        state.checkoutSuccess = null;
+    }
     render();
 }
 
 function navigateListing(key) {
     state.listingKey = key;
     navigate("listing");
+}
+
+function navigateToCheckout(ctx) {
+    state.checkoutSuccess = null;
+    state.checkoutContext = ctx;
+    state.view = "checkout";
+    render();
+}
+
+function navigateTransactions() {
+    state.checkoutSuccess = null;
+    state.view = "transactions";
+    render();
 }
 
 function wireNav(root) {
@@ -389,11 +562,67 @@ function wireNav(root) {
     root.querySelectorAll("[data-action='my-listings']").forEach((btn) => {
         btn.addEventListener("click", () => navigate("my-listings"));
     });
+    root.querySelectorAll("[data-action='transactions']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigateTransactions();
+        });
+    });
+    root.querySelectorAll("[data-action='back-checkout']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            state.view = "listing";
+            render();
+        });
+    });
+    root.querySelectorAll("[data-action='tx-open-listing']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = btn.getAttribute("data-listing-key");
+            if (!key) return;
+            navigateListing(key);
+        });
+    });
+    root.querySelectorAll("[data-action='clear-local-transactions']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            if (!confirm("Clear all transactions saved in this browser? (Demo only.)")) return;
+            clearLocalTransactions();
+            render();
+        });
+    });
+    root.querySelectorAll("[data-action='tx-set-filter']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const f = btn.getAttribute("data-tx-filter");
+            if (f === "all" || f === "action") {
+                state.txFilter = f;
+                render();
+            }
+        });
+    });
     root.querySelectorAll("[data-action='view-listing']").forEach((btn) => {
         btn.addEventListener("click", () => {
             const key = btn.getAttribute("data-listing-key");
             if (!key) return;
             navigateListing(key);
+        });
+    });
+}
+
+function wireTradeActions(root) {
+    root.querySelectorAll("[data-action='start-checkout']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const snap = state.lastListingCheckoutSnap;
+            if (!snap || snap.isMine) return;
+            navigateToCheckout({
+                key: snap.listingKey,
+                title: snap.title,
+                price: snap.price,
+                sellerDisplayName: snap.sellerDisplayName,
+                imageUrl: snap.imageUrl,
+                listingId: snap.listingId,
+                gapSolution: snap.gapSolution ?? null,
+                pickupStart: snap.pickupStart ?? null,
+                pickupEnd: snap.pickupEnd ?? null,
+            });
         });
     });
 }
@@ -948,6 +1177,7 @@ async function renderHome() {
                     <div class="collapse navbar-collapse" id="cdmNav">
                         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
                             <li class="nav-item"><a class="nav-link" href="#" aria-current="page">Home</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Events</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Schools</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Help</a></li>
@@ -1025,7 +1255,7 @@ async function renderHome() {
                                         <a href="#" aria-disabled="true">
                                             <span>
                                                 <div class="fw-semibold">Seller’s choice</div>
-                                                <div class="cdm-linkmeta">Sell or donate + 7% seller fee</div>
+                                                <div class="cdm-linkmeta">Sell or donate + 7% to CDM on sales</div>
                                             </span>
                                             <span class="cdm-muted">›</span>
                                         </a>
@@ -1127,7 +1357,7 @@ async function renderHome() {
                                             </div>
                                             <div class="fw-semibold mt-3">Donations + selling</div>
                                             <div class="cdm-muted small mt-1">
-                                                Sellers choose: list for sale or donate. If selling, platform takes a 7% transaction fee from the seller.
+                                                Sellers choose: list for sale or donate. On sales, CDM collects a 7% marketplace fee to the platform.
                                             </div>
                                         </div>
                                     </div>
@@ -1209,7 +1439,7 @@ async function renderHome() {
                             <div class="accordion-item">
                                 <h2 class="accordion-header">
                                     <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#faq1">
-                                        Why not Facebook Marketplace?
+                                        Why not generic resale apps or random dorm posts?
                                     </button>
                                 </h2>
                                 <div id="faq1" class="accordion-collapse collapse show" data-bs-parent="#faqAccordion">
@@ -1274,8 +1504,8 @@ async function renderHome() {
                             <div class="col-12 col-lg-4">
                                 <div class="cdm-muted small mb-2">Social</div>
                                 <div class="d-flex gap-3">
-                                    <a href="#" aria-disabled="true">Instagram</a>
-                                    <a href="#" aria-disabled="true">Facebook</a>
+                                    <a href="#" aria-disabled="true">Photos (soon)</a>
+                                    <a href="#" aria-disabled="true">Updates (soon)</a>
                                 </div>
                             </div>
                         </div>
@@ -1323,6 +1553,7 @@ function renderPost() {
                         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
                             <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Help</a></li>
                         </ul>
 
@@ -1449,7 +1680,7 @@ function renderPost() {
                                             <label class="form-check-label" for="lt-donate">Donate (free)</label>
                                         </div>
                                     </div>
-                                    <div class="cdm-muted small mt-1">Selling: 7% platform fee on the seller side (policy — not charged in this draft).</div>
+                                    <div class="cdm-muted small mt-1">Selling: CDM collects 7% to the platform on sales (not charged in this draft).</div>
                                 </div>
 
                                 <div class="col-12 col-md-6" id="post-price-wrap">
@@ -1632,11 +1863,24 @@ function renderListingDbFromApi(L) {
                             <div class="cdm-muted small">Posted</div>
                             <div class="fw-semibold">${posted}</div>
                         </div>
-                        <button class="btn btn-outline-secondary mt-3 w-100" type="button" disabled>Claim / Buy (coming soon)</button>
+                        <button class="btn cdm-btn-crimson mt-3 w-100" type="button" data-action="start-checkout">${
+                            priceNum === 0 ? "Claim (free)" : "Buy"
+                        }</button>
+                        <div class="cdm-muted small mt-2">Paid listings: CDM collects 7% to the platform. You pay the list price. Pickup via chat after you continue.</div>
                     </div>
                 </div>
             </div>
           `;
+
+    state.lastListingCheckoutSnap = {
+        listingKey: state.listingKey,
+        title: L.title,
+        price: priceNum,
+        sellerDisplayName: L.sellerDisplayName || "Seller",
+        imageUrl: L.imageUrl,
+        listingId: L.listingId,
+        isMine: false,
+    };
 
     const shell = el(`
         <div class="cdm-shell">
@@ -1664,6 +1908,7 @@ function renderListingDbFromApi(L) {
                             <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
                         </ul>
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
@@ -1693,6 +1938,7 @@ function renderListingDbFromApi(L) {
 
     root.appendChild(shell);
     wireNav(shell);
+    wireTradeActions(shell);
     ensureAuthUi();
 }
 
@@ -1740,10 +1986,26 @@ function renderListingSyncInner() {
               ? "Sample feed listing"
               : "";
 
-    const body = !L
-        ? `<div class="cdm-card p-5 text-center cdm-muted">That listing doesn’t exist anymore.</div>`
-        : resolved.source === "sample"
-          ? `
+    let body = "";
+    if (!L) {
+        state.lastListingCheckoutSnap = null;
+        body = `<div class="cdm-card p-5 text-center cdm-muted">That listing doesn’t exist anymore.</div>`;
+    } else if (resolved.source === "sample") {
+        const samplePrice = parseUsdFromPriceLabel(L.priceLabel);
+        state.lastListingCheckoutSnap = {
+            listingKey: state.listingKey,
+            title: L.title,
+            price: samplePrice,
+            sellerDisplayName: "Demo seller",
+            imageUrl: L.photoDataUrl || null,
+            listingId: null,
+            isMine: false,
+            gapSolution: L.gapSolution ?? null,
+            pickupStart: L.pickupStart ?? null,
+            pickupEnd: L.pickupEnd ?? null,
+        };
+        const tradeLabel = samplePrice > 0 ? "Buy" : "Claim (free)";
+        body = `
             <div class="row g-3">
                 <div class="col-12 col-lg-7">
                     <div class="cdm-card p-4">
@@ -1752,19 +2014,33 @@ function renderListingSyncInner() {
                         <div class="mt-3">
                             <span class="badge text-bg-light border">Price: ${escapeHtml(L.priceLabel)}</span>
                         </div>
-                        <div class="cdm-muted small mt-3">Demo card only — not loaded from MySQL.</div>
+                        <div class="cdm-muted small mt-3">Demo card — try checkout UI; no charge.</div>
                     </div>
                 </div>
                 <div class="col-12 col-lg-5">
                     <div class="cdm-card p-4">
-                        <div class="fw-semibold mb-2">Next steps</div>
-                        <div class="cdm-muted small">Open a listing from the home feed to use <code>GET /api/listings/{id}</code>.</div>
-                        <button class="btn cdm-btn-crimson mt-3" type="button" disabled>Claim / Buy</button>
+                        <div class="fw-semibold mb-2">Seller’s choice</div>
+                        <div class="cdm-muted small">Same flow as live listings: <strong>Buy</strong> if priced, <strong>Claim</strong> if free/donation.</div>
+                        <button class="btn cdm-btn-crimson mt-3 w-100" type="button" data-action="start-checkout">${tradeLabel}</button>
                     </div>
                 </div>
             </div>
-          `
-          : `
+          `;
+    } else {
+        const minePrice = L.listingType === "donate" ? 0 : Number(L.price) || 0;
+        state.lastListingCheckoutSnap = {
+            listingKey: state.listingKey,
+            title: L.title,
+            price: minePrice,
+            sellerDisplayName: "You (seller draft)",
+            imageUrl: L.photoDataUrl || null,
+            listingId: null,
+            isMine: true,
+            gapSolution: L.gapSolution ?? null,
+            pickupStart: L.pickupStart ?? null,
+            pickupEnd: L.pickupEnd ?? null,
+        };
+        body = `
             <div class="row g-3">
                 <div class="col-12 col-lg-7">
                     <div class="cdm-card p-4">
@@ -1796,11 +2072,12 @@ function renderListingSyncInner() {
                             <div class="fw-semibold">${L.listingMode === "ai" ? "AI (photo)" : "Manual"}</div>
                         </div>
                         ${L.aiPhotoFileName ? `<div class="cdm-muted small mt-2">Photo: ${escapeHtml(L.aiPhotoFileName)}</div>` : ""}
-                        <button class="btn cdm-btn-crimson mt-3" type="button" disabled>Publish (later)</button>
+                        <button class="btn btn-outline-secondary mt-3 w-100" type="button" disabled>Your draft — buyers can’t check out until this is published</button>
                     </div>
                 </div>
             </div>
           `;
+    }
 
     const shell = el(`
         <div class="cdm-shell">
@@ -1828,6 +2105,7 @@ function renderListingSyncInner() {
                             <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
                         </ul>
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
@@ -1857,6 +2135,7 @@ function renderListingSyncInner() {
 
     root.appendChild(shell);
     wireNav(shell);
+    wireTradeActions(shell);
     ensureAuthUi();
 }
 
@@ -1901,6 +2180,7 @@ function renderMyListings() {
                             <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
                             <li class="nav-item"><a class="nav-link active" href="#" aria-current="page">My listings</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Help</a></li>
                         </ul>
 
@@ -1940,6 +2220,568 @@ function syncApiPill() {
     if (pill) pill.textContent = `API: ${state.apiHealth.status}`;
 }
 
+function wireCheckoutPage(root) {
+    root.querySelector("#checkout-confirm-btn")?.addEventListener("click", () => {
+        const ctx = state.checkoutContext;
+        if (!ctx) return;
+        const isSale = ctx.price > 0;
+        saveLocalTransaction({
+            id: crypto.randomUUID(),
+            createdAt: new Date().toISOString(),
+            title: ctx.title,
+            listingKey: ctx.key,
+            listingId: ctx.listingId,
+            kind: isSale ? "purchase" : "claim",
+            listPrice: ctx.price,
+            platformFee: isSale ? platformFeeFromSale(ctx.price) : 0,
+            sellerNet: isSale ? sellerNetFromSale(ctx.price) : 0,
+            status: "awaiting_chat",
+        });
+        state.checkoutSuccess = { title: ctx.title, isSale };
+        state.checkoutContext = null;
+        state.view = "checkout-success";
+        render();
+    });
+}
+
+function renderCheckout() {
+    const root = document.getElementById("app");
+    const ctx = state.checkoutContext;
+    root.innerHTML = "";
+
+    if (!ctx) {
+        navigate("home");
+        return;
+    }
+
+    const isSale = ctx.price > 0;
+    const thumb =
+        ctx.imageUrl && String(ctx.imageUrl).trim()
+            ? `<div class="cdm-checkout-thumb-wrap"><img alt="" src="${escapeHtml(String(ctx.imageUrl).trim())}" /></div>`
+            : `<div class="cdm-checkout-thumb-wrap d-flex align-items-center justify-content-center text-muted small">No photo</div>`;
+
+    const heroTitle = isSale ? "Checkout" : "Claim this item";
+    const heroKicker = isSale
+        ? "Check your total, then confirm. You’re reusing dorm gear instead of feeding the May dumpster rush."
+        : "Seller chose donate / free. Confirm to save this claim. Same respect as a paid sale, zero platform fee.";
+
+    const pickupUrgencyHtml = formatCheckoutPickupUrgencyHtml(ctx);
+
+    const missionWhyCollapsible = `
+        <div class="mb-3">
+            <button
+                class="cdm-checkout-disclosure-btn collapsed rounded-3 border bg-white px-3 py-2 shadow-sm"
+                style="border-color: rgba(0,0,0,0.08)"
+                type="button"
+                data-bs-toggle="collapse"
+                data-bs-target="#cdmWhyCdmCheckout"
+                aria-expanded="false"
+                aria-controls="cdmWhyCdmCheckout"
+            >
+                <span>Why CDM? Mission &amp; other campuses</span>
+                <span class="cdm-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="collapse" id="cdmWhyCdmCheckout">
+                <div class="cdm-checkout-mission mt-2 mb-0" role="note">
+                    <strong class="text-body">Why CDM exists.</strong>
+                    Each May, residence dumpsters fill with usable twin XL bedding, fridges, microwaves, and furniture, often because there’s no easy way to sell or store until August.
+                    CDM connects <strong>move-out</strong> sellers and donors with <strong>move-in</strong> buyers so those items get reused, not re-bought new three months later.
+                </div>
+                <p class="cdm-checkout-footnote mt-2 mb-0 px-1">
+                    <strong>White-label:</strong> Built to run per campus (branding, dorms, locations) on shared infrastructure: UA first, same stack for other schools later.
+                </p>
+            </div>
+        </div>
+    `;
+
+    const paymentSummaryNote = `
+        <div class="cdm-checkout-payment rounded-3 px-3 py-2 mb-3">
+            <strong>Pay the seller</strong> however you both agree: Venmo, Zelle, Cash App, or cash.
+            <span class="d-block small mt-1" style="color:#6e6e73;">CDM doesn’t process payments in-app yet, so sort it in chat.</span>
+        </div>
+    `;
+
+    const saleDetailPanels = isSale
+        ? `
+            <div class="cdm-checkout-panel">
+                <h3>Price details</h3>
+                <p>
+                    <strong>Your total</strong> is the list price; nothing extra is added at checkout.
+                    CDM still collects a <strong>7% marketplace fee</strong> on paid sales (it goes to the platform); it’s just not stacked on top of what you pay here.
+                </p>
+                <hr class="cdm-checkout-line" />
+                <div class="cdm-checkout-row">
+                    <span class="cdm-checkout-row-label">Total</span>
+                    <span class="cdm-checkout-row-value">${formatUsd(ctx.price)}</span>
+                </div>
+            </div>
+            <div class="cdm-checkout-panel">
+                <button
+                    class="cdm-checkout-disclosure-btn collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#cdmFeeCompare"
+                    aria-expanded="false"
+                    aria-controls="cdmFeeCompare"
+                >
+                    <span>How our 7% compares</span>
+                    <span class="cdm-chevron" aria-hidden="true">▼</span>
+                </button>
+                <div class="collapse" id="cdmFeeCompare">
+                    <div class="cdm-checkout-disclosure-body">
+                        CDM’s cut is in the lower–mid range vs many resale apps, and the fee funds the app.
+                        <ul class="mt-2 mb-0 ps-3">
+                            <li>Lots of peer marketplaces land around <strong>10–13%</strong> on sold items.</li>
+                            <li>Shipped orders elsewhere often add another <strong>~5–10%</strong> in fees.</li>
+                            <li>Our <strong>7%</strong> is aimed at staying fair for students.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        `
+        : `
+            <div class="cdm-checkout-panel">
+                <h3>Why claim on CDM</h3>
+                <p>
+                    Donations and free listings get the same care as sales: seller’s choice, platform supports both equally.
+                    You skip another retail run and give something a second life in the dorms.
+                </p>
+                <p class="mb-0">After you confirm, you’ll coordinate pickup in <strong>chat</strong> (opening soon). Post-meetup confirmation rules are still <strong>TBD</strong> for your team.</p>
+            </div>
+        `;
+
+    const storagePanel = `
+        <div class="cdm-checkout-panel">
+            <h3>Storage (optional)</h3>
+            <p>
+                The <strong>three-month gap</strong> (May move-out → August move-in) is exactly when good stuff gets tossed or stored.
+                If your school offers a storage path through CDM, fees may depend on <strong>item size</strong> (larger = more space).
+            </p>
+            <p class="mb-0">
+                Rates and partners are <strong>TBD</strong>. When your campus turns this on, estimated storage cost will show here before you commit.
+            </p>
+        </div>
+    `;
+
+    const chatPanel = `
+        <div class="cdm-checkout-panel">
+            <h3>Pickup &amp; safety</h3>
+            <p class="mb-0">In-app chat will connect you and the seller to agree on a time and place, usually a <strong>public spot</strong> on campus (lobby, designated meetup zone).</p>
+            <ul class="cdm-checkout-safety">
+                <li>Meet in daylight when you can; bring a friend if you prefer.</li>
+                <li>Don’t share your room number until you’re comfortable. Keep it to well-trafficked areas.</li>
+                <li>Use the payment note in your summary (Venmo, Zelle, etc.). Keep receipts in chat if you want proof.</li>
+            </ul>
+            <div class="cdm-chat-placeholder">Chat opens here after confirm (UI coming soon).</div>
+        </div>
+    `;
+
+    const stepsPanel = `
+        <div class="cdm-checkout-panel">
+            <h3>What happens next</h3>
+            <ol class="cdm-checkout-steps">
+                <li><strong>Confirm:</strong> we add this to your Transactions list (preview: saved in this browser).</li>
+                <li><strong>Chat:</strong> message the seller to lock in pickup; be specific about day/time.</li>
+                <li><strong>Handoff:</strong> meet up, inspect the item, done. Formal “received” / dispute flow is TBD.</li>
+            </ol>
+        </div>
+    `;
+
+    const summaryBadge = isSale
+        ? `<div class="cdm-checkout-badge cdm-checkout-badge--warm">Campus sale · seller’s choice</div>`
+        : `<div class="cdm-checkout-badge">Free · donated on CDM</div>`;
+
+    const summaryTotalLine = isSale
+        ? `<div class="cdm-checkout-row align-items-center mt-3">
+               <span class="cdm-checkout-total mb-0">Total</span>
+               <span class="cdm-checkout-total mb-0">${formatUsd(ctx.price)}</span>
+           </div>
+           <p class="cdm-checkout-footnote mb-0">Tax isn’t shown in this preview. Payment is direct to seller (see note above).</p>`
+        : `<div class="cdm-checkout-row align-items-center mt-3">
+               <span class="cdm-checkout-total mb-0">Due today</span>
+               <span class="cdm-checkout-total mb-0">${formatUsd(0)}</span>
+           </div>
+           <p class="cdm-checkout-footnote mb-0">No 7% fee on free claims. Say thanks, show up on time.</p>`;
+
+    const shell = el(`
+        <div class="cdm-shell cdm-checkout-shell">
+            <nav class="navbar navbar-expand-lg navbar-dark cdm-topbar cdm-navbar-top cdm-checkout-topbar">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+                    <button
+                        class="navbar-toggler border border-light border-opacity-50"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavCheckout"
+                        aria-controls="cdmNavCheckout"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="cdmNavCheckout">
+                        <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
+                        </ul>
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot"></div>
+                    </div>
+                </div>
+            </nav>
+            <div class="body-content cdm-body-content pb-5">
+                <div class="container-fluid cdm-checkout-max px-3 px-lg-4 pt-4 pb-5">
+                    <button type="button" class="cdm-checkout-back mb-3" data-action="back-checkout">‹ ${isSale ? "Listing" : "Back"}</button>
+                    ${checkoutProgressHtml("review")}
+                    <h1 class="cdm-checkout-hero-title">${heroTitle}</h1>
+                    <p class="cdm-checkout-hero-kicker mb-3 pb-lg-1">${heroKicker}</p>
+                    ${missionWhyCollapsible}
+                    ${pickupUrgencyHtml ? `<div class="mb-3">${pickupUrgencyHtml}</div>` : ""}
+
+                    <div class="row g-4 g-lg-5 align-items-start">
+                        <div class="col-12 col-lg-5 order-1 order-lg-2">
+                            <div class="cdm-checkout-summary cdm-checkout-summary--sticky">
+                                <h2>Order summary</h2>
+                                ${summaryBadge}
+                                ${paymentSummaryNote}
+                                <div class="cdm-checkout-row align-items-center">
+                                    <div class="d-flex gap-3">
+                                        ${thumb}
+                                        <div>
+                                            <div class="cdm-checkout-item-title">${escapeHtml(ctx.title)}</div>
+                                            <div class="small mt-1" style="color:#6e6e73;">Qty 1 · ${escapeHtml(ctx.sellerDisplayName)}</div>
+                                        </div>
+                                    </div>
+                                    <div class="cdm-checkout-row-value">${isSale ? formatUsd(ctx.price) : formatUsd(0)}</div>
+                                </div>
+                                <hr class="cdm-checkout-line" />
+                                ${summaryTotalLine}
+                                <button type="button" class="btn cdm-btn-crimson cdm-checkout-cta" id="checkout-confirm-btn">
+                                    ${isSale ? "Confirm purchase" : "Claim item"}
+                                </button>
+                                <button type="button" class="cdm-checkout-cta-secondary" data-action="back-checkout">Cancel</button>
+                                <p class="cdm-checkout-footnote mb-0">
+                                    Preview: saved in this browser only. Production will use your <code>transactions</code> API and real payment rules.
+                                </p>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-7 order-2 order-lg-1">
+                            ${saleDetailPanels}
+                            ${storagePanel}
+                            ${chatPanel}
+                            ${stepsPanel}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    wireCheckoutPage(shell);
+    ensureAuthUi();
+}
+
+function renderCheckoutSuccess() {
+    const root = document.getElementById("app");
+    const s = state.checkoutSuccess;
+    root.innerHTML = "";
+    if (!s) {
+        navigate("home");
+        return;
+    }
+
+    const shell = el(`
+        <div class="cdm-shell cdm-checkout-shell">
+            <nav class="navbar navbar-expand-lg navbar-dark cdm-topbar cdm-navbar-top cdm-checkout-topbar">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+                    <button
+                        class="navbar-toggler border border-light border-opacity-50"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavCheckoutOk"
+                        aria-controls="cdmNavCheckoutOk"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="cdmNavCheckoutOk">
+                        <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
+                        </ul>
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot"></div>
+                    </div>
+                </div>
+            </nav>
+            <div class="body-content cdm-body-content pb-5">
+                <div class="container-fluid cdm-checkout-max px-3 px-lg-4 pt-4 pb-5">
+                    ${checkoutProgressHtml("success", true)}
+                    <div class="cdm-checkout-success-card text-center mx-auto" style="max-width: 28rem">
+                        <div class="cdm-checkout-success-icon mx-auto mb-3" aria-hidden="true">✓</div>
+                        <h1 class="cdm-checkout-hero-title mb-2">You’re in</h1>
+                        <p class="cdm-checkout-hero-kicker mx-auto mb-4">
+                            Your ${s.isSale ? "purchase" : "free claim"} of
+                            <span class="fw-semibold text-body">${escapeHtml(s.title)}</span> is saved. Next step: talk to the seller.
+                        </p>
+                        <button type="button" class="btn btn-outline-secondary w-100 rounded-pill py-2 mb-2" disabled id="checkout-success-chat">
+                            Open chat (coming soon)
+                        </button>
+                        <button type="button" class="btn cdm-btn-crimson w-100 cdm-checkout-cta mb-2" id="checkout-success-transactions">
+                            View my transactions
+                        </button>
+                        <button type="button" class="btn btn-link text-decoration-none" data-action="go-home">Continue shopping</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    document.getElementById("checkout-success-transactions")?.addEventListener("click", () => navigateTransactions());
+    ensureAuthUi();
+}
+
+function renderTransactions() {
+    const root = document.getElementById("app");
+    root.innerHTML = "";
+
+    const rows = loadLocalTransactions();
+    if (rows.length === 0) {
+        state.txFilter = "all";
+    }
+    const nPurchase = rows.filter((r) => r.kind === "purchase").length;
+    const nClaim = rows.filter((r) => r.kind === "claim").length;
+    const nNeedsAction = rows.filter((r) => String(r.status).toLowerCase() === "awaiting_chat").length;
+
+    const filteredRows =
+        state.txFilter === "action"
+            ? rows.filter((r) => String(r.status).toLowerCase() === "awaiting_chat")
+            : rows;
+
+    const filterAllActive = state.txFilter === "all" ? "is-active" : "";
+    const filterActionActive = state.txFilter === "action" ? "is-active" : "";
+
+    const needsActionBanner =
+        rows.length > 0 && nNeedsAction > 0
+            ? `
+        <div class="cdm-tx-alert mb-3" role="status">
+            <div class="cdm-tx-alert-title">${nNeedsAction} ${nNeedsAction === 1 ? "thing needs" : "things need"} your attention</div>
+            <p class="cdm-tx-alert-body mb-0">
+                Big-box order pages show package tracking. Here it’s <strong>you + another student</strong> on campus. Chat isn’t live yet, so use <strong>View listing</strong> for now. Pay with Venmo / Zelle / cash when you agree.
+            </p>
+        </div>
+    `
+            : "";
+
+    const statsHtml =
+        rows.length === 0
+            ? ""
+            : `
+        <div class="cdm-tx-stats d-flex flex-wrap gap-2 mb-3">
+            <span class="cdm-tx-stat-pill">${rows.length} total</span>
+            ${nPurchase ? `<span class="cdm-tx-stat-pill">${nPurchase} paid</span>` : ""}
+            ${nClaim ? `<span class="cdm-tx-stat-pill">${nClaim} free</span>` : ""}
+            ${nNeedsAction ? `<span class="cdm-tx-stat-pill cdm-tx-stat-pill--pulse">${nNeedsAction} need you</span>` : ""}
+        </div>
+    `;
+
+    const filterRow =
+        rows.length === 0
+            ? ""
+            : `
+        <div class="cdm-tx-filters d-flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Filter transactions">
+            <button type="button" class="cdm-tx-filter-pill ${filterAllActive}" data-action="tx-set-filter" data-tx-filter="all" role="tab" aria-selected="${state.txFilter === "all"}">
+                All · ${rows.length}
+            </button>
+            <button type="button" class="cdm-tx-filter-pill ${filterActionActive}" data-action="tx-set-filter" data-tx-filter="action" role="tab" aria-selected="${state.txFilter === "action"}">
+                Needs you${nNeedsAction ? ` · ${nNeedsAction}` : ""}
+            </button>
+        </div>
+    `;
+
+    const cdmTipCard =
+        rows.length === 0
+            ? ""
+            : `
+        <div class="cdm-tx-tip mb-4">
+            <div class="cdm-tx-tip-title">How CDM is different</div>
+            <p class="cdm-tx-tip-body mb-0">
+                No trucks, no warehouse: just <strong>campus pickup</strong> and DMs. CDM’s <strong>7%</strong> goes to the <strong>platform</strong>, not added on top of your total. Sellers can <strong>sell or donate</strong>; you always see both the same way here.
+            </p>
+        </div>
+    `;
+
+    const quickNav = `
+        <div class="cdm-tx-quicknav d-flex flex-wrap gap-2 mb-4">
+            <button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="go-home">Shop feed</button>
+            <button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="post-item">List something</button>
+            <button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="my-listings">My listings</button>
+        </div>
+    `;
+
+    const emptyHtml = `
+        <div class="cdm-tx-empty text-center py-5 px-3">
+            <div class="cdm-tx-empty-icon mb-3" aria-hidden="true">✨</div>
+            <h2 class="cdm-checkout-hero-title h4 mb-2">No dorm moves yet</h2>
+            <p class="cdm-muted mx-auto mb-4" style="max-width: 26rem">
+                Your <strong>buys</strong> and <strong>free claims</strong> show up here after checkout, same vibe whether someone sold or donated.
+                Right now it’s <strong>this browser only</strong> until your API backs it.
+            </p>
+            <button type="button" class="btn cdm-btn-crimson rounded-pill px-4 me-2 mb-2" data-action="go-home">Find stuff</button>
+            <button type="button" class="btn btn-outline-dark rounded-pill px-4 mb-2" data-action="post-item">Post an item</button>
+        </div>
+    `;
+
+    const filterEmptyHtml = `
+        <div class="cdm-tx-filter-empty text-center py-5 px-3 mb-3">
+            <div class="cdm-tx-empty-icon mb-2" aria-hidden="true">🧘</div>
+            <p class="mb-2 fw-semibold">Nothing needs you right now</p>
+            <p class="cdm-muted small mb-3">You’re caught up, or switch to <strong>All</strong> to see history.</p>
+            <button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="tx-set-filter" data-tx-filter="all">Show all</button>
+        </div>
+    `;
+
+    let listHtml = "";
+    if (rows.length === 0) {
+        listHtml = emptyHtml;
+    } else if (filteredRows.length === 0) {
+        listHtml = filterEmptyHtml;
+    } else {
+        listHtml = filteredRows
+            .map((t) => {
+                const isPurchase = t.kind === "purchase";
+                const kindBadge = isPurchase
+                    ? `<span class="cdm-tx-kind cdm-tx-kind--sale">Paid</span>`
+                    : `<span class="cdm-tx-kind cdm-tx-kind--claim">Free</span>`;
+                const statusText = escapeHtml(transactionStatusLabel(t.status));
+                const statusClass =
+                    String(t.status).toLowerCase() === "completed"
+                        ? "cdm-tx-status cdm-tx-status--done"
+                        : "cdm-tx-status";
+                const headline = transactionStatusHeadline(t.status, t.kind);
+                const rel = formatRelativeTimeShort(t.createdAt);
+                const abs = escapeHtml(formatSavedAt(t.createdAt));
+                const timeLine = rel ? `<span class="cdm-tx-rel">${escapeHtml(rel)}</span> · ${abs}` : abs;
+                const refBits = [];
+                if (t.listingId != null) refBits.push(`#${t.listingId}`);
+                if (t.listingKey) refBits.push(escapeHtml(String(t.listingKey)));
+                const refLine =
+                    refBits.length > 0
+                        ? `<div class="cdm-tx-ref">${refBits.join(" · ")}</div>`
+                        : "";
+                const thumb = transactionThumbEmoji(t.title);
+                const priceLine = isPurchase
+                    ? `<div class="cdm-tx-total-pill">${formatUsd(t.listPrice)} <span class="cdm-tx-total-sub">total</span></div>`
+                    : `<div class="cdm-tx-total-pill cdm-tx-total-pill--free">$0 <span class="cdm-tx-total-sub">claim</span></div>`;
+                const feeNote = isPurchase
+                    ? `<p class="cdm-tx-footnote mb-0 mt-2">7% to CDM on this sale (not added on top of what you paid).</p>`
+                    : `<p class="cdm-tx-footnote mb-0 mt-2">No fee. Say thanks when you meet up.</p>`;
+                const listingBtn =
+                    t.listingKey && String(t.listingKey).trim()
+                        ? `<button type="button" class="btn btn-sm cdm-btn-crimson rounded-pill px-3" data-action="tx-open-listing" data-listing-key="${escapeHtml(String(t.listingKey).trim())}">View listing</button>`
+                        : "";
+                return `
+            <article class="cdm-tx-card mb-3">
+                <div class="cdm-tx-card-statusline">${headline}</div>
+                <div class="d-flex gap-3 mt-3">
+                    <div class="cdm-tx-thumb" aria-hidden="true">${thumb}</div>
+                    <div class="flex-grow-1 min-w-0">
+                        <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-1">
+                            <h2 class="cdm-tx-card-title h6 mb-0">${escapeHtml(t.title)}</h2>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">${kindBadge}<span class="${statusClass}">${statusText}</span></div>
+                        </div>
+                        <div class="cdm-tx-meta">${timeLine}</div>
+                        ${refLine}
+                        <div class="d-flex flex-wrap align-items-center gap-2 mt-2">${priceLine}</div>
+                        ${feeNote}
+                    </div>
+                </div>
+                <div class="cdm-tx-actions d-flex flex-wrap gap-2 mt-3 pt-3">
+                    ${listingBtn}
+                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill" disabled title="Coming soon">Open chat</button>
+                </div>
+            </article>
+        `;
+            })
+            .join("");
+    }
+
+    const footerTools =
+        rows.length > 0
+            ? `<p class="text-center mt-4 mb-0">
+                <button type="button" class="btn btn-link btn-sm text-muted text-decoration-none" data-action="clear-local-transactions">Clear local history (demo)</button>
+            </p>`
+            : "";
+
+    const shell = el(`
+        <div class="cdm-shell cdm-checkout-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+                    <button
+                        class="navbar-toggler"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavTx"
+                        aria-controls="cdmNavTx"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="cdmNavTx">
+                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
+                            <li class="nav-item"><a class="nav-link active" href="#" aria-current="page">Transactions</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
+                        </ul>
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot"></div>
+                    </div>
+                </div>
+            </nav>
+            <div class="body-content cdm-body-content pb-5">
+                <div class="container-fluid cdm-checkout-max px-3 px-lg-4 pt-4 pb-4">
+                    <div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-2">
+                        <div>
+                            <p class="cdm-tx-eyebrow mb-1">Your campus activity</p>
+                            <h1 class="cdm-checkout-hero-title mb-1">Transactions</h1>
+                            <p class="cdm-checkout-hero-kicker mb-0">
+                                Your <strong>paid buys</strong> and <strong>free claims</strong> in one place, built for <strong>peer pickup</strong> on campus, not shipping labels and warehouses.
+                            </p>
+                        </div>
+                    </div>
+                    <p class="cdm-tx-demo-note small mb-3">Demo: stored in this browser · plug in <code>GET /api/transactions</code> when ready</p>
+                    ${quickNav}
+                    ${needsActionBanner}
+                    ${statsHtml}
+                    ${filterRow}
+                    ${cdmTipCard}
+                    ${listHtml}
+                    ${footerTools}
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+}
+
 function render() {
     if (state.view === "post") {
         renderPost();
@@ -1947,6 +2789,12 @@ function render() {
         renderMyListings();
     } else if (state.view === "listing") {
         void renderListing();
+    } else if (state.view === "checkout") {
+        renderCheckout();
+    } else if (state.view === "checkout-success") {
+        renderCheckoutSuccess();
+    } else if (state.view === "transactions") {
+        renderTransactions();
     } else {
         void renderHome();
     }
