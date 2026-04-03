@@ -127,28 +127,46 @@ public sealed class AuthController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<ActionResult<AuthResponse>> Login([FromBody] LoginRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
+        var emailRaw = request.Email?.Trim() ?? "";
+        var passwordRaw = request.Password ?? "";
+        if (string.IsNullOrWhiteSpace(emailRaw) || string.IsNullOrWhiteSpace(passwordRaw))
         {
             return Unauthorized("Invalid email or password.");
         }
 
-        var user = await _users.GetByEmailAsync(request.Email);
+        var user = await _users.GetByEmailAsync(emailRaw);
         if (user is null)
         {
             return Unauthorized("Invalid email or password.");
         }
 
-        var ok = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
-        if (!ok)
+        if (string.IsNullOrWhiteSpace(user.PasswordHash))
         {
             return Unauthorized("Invalid email or password.");
         }
 
-        var (token, expires) = _jwt.CreateToken(user.Id, user.Email);
+        bool passwordOk;
+        try
+        {
+            // Non-BCrypt values in password_hash (e.g. manual SQL inserts) throw — treat as failed login.
+            passwordOk = BCrypt.Net.BCrypt.Verify(passwordRaw, user.PasswordHash);
+        }
+        catch
+        {
+            passwordOk = false;
+        }
+
+        if (!passwordOk)
+        {
+            return Unauthorized("Invalid email or password.");
+        }
+
+        var emailForToken = user.Email.Trim().ToLowerInvariant();
+        var (token, expires) = _jwt.CreateToken(user.Id, emailForToken);
         return Ok(new AuthResponse
         {
             Token = token,
-            Email = user.Email,
+            Email = emailForToken,
             ExpiresAtUtc = expires,
         });
     }
