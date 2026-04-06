@@ -59,11 +59,12 @@ public sealed class UserRepository
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync();
 
+        // Match case-insensitive + trimmed so logins work even if legacy rows mixed email casing.
         const string sql = """
             SELECT user_id, campus_id, email, password_hash, display_name, phone, lives_on_campus,
                    move_in_date, move_out_date, dorm_building, suite_letter
             FROM users
-            WHERE email = @Email
+            WHERE LOWER(TRIM(email)) = @Email
             LIMIT 1;
             """;
 
@@ -101,6 +102,88 @@ public sealed class UserRepository
             DormBuilding = dorm,
             SuiteLetter = suite,
         };
+    }
+
+    public async Task<UserProfileDto?> GetProfileByIdAsync(int userId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        const string sql = """
+            SELECT user_id, campus_id, email, display_name, phone, lives_on_campus,
+                   move_in_date, move_out_date, dorm_building, suite_letter, avatar_url
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        await using var cmd = new MySqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@UserId", userId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        string? suite = null;
+        if (!reader.IsDBNull(9))
+        {
+            var s = reader.GetString(9);
+            suite = string.IsNullOrWhiteSpace(s) ? null : s.Trim().ToUpperInvariant()[0].ToString();
+        }
+
+        return new UserProfileDto
+        {
+            UserId = reader.GetInt32(0),
+            CampusId = reader.GetInt32(1),
+            Email = reader.GetString(2),
+            DisplayName = reader.GetString(3),
+            Phone = reader.GetString(4),
+            LivesOnCampus = reader.GetBoolean(5),
+            MoveInDate = reader.GetDateTime(6),
+            MoveOutDate = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+            DormBuilding = reader.IsDBNull(8) ? null : reader.GetString(8),
+            SuiteLetter = suite,
+            AvatarUrl = reader.IsDBNull(10) ? null : reader.GetString(10),
+        };
+    }
+
+    public async Task<bool> UpdateProfileAsync(int userId, UpdateUserProfileRequest request, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        const string sql = """
+            UPDATE users
+            SET display_name = @DisplayName,
+                phone = @Phone,
+                lives_on_campus = @LivesOnCampus,
+                move_in_date = @MoveInDate,
+                move_out_date = @MoveOutDate,
+                dorm_building = @DormBuilding,
+                suite_letter = @SuiteLetter,
+                avatar_url = @AvatarUrl
+            WHERE user_id = @UserId;
+            """;
+
+        await using var cmd = new MySqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@UserId", userId);
+        cmd.Parameters.AddWithValue("@DisplayName", request.DisplayName.Trim());
+        cmd.Parameters.AddWithValue("@Phone", request.Phone.Trim());
+        cmd.Parameters.AddWithValue("@LivesOnCampus", request.LivesOnCampus);
+        cmd.Parameters.AddWithValue("@MoveInDate", DateTime.Parse(request.MoveInDate).Date);
+        cmd.Parameters.AddWithValue("@MoveOutDate", string.IsNullOrWhiteSpace(request.MoveOutDate) ? DBNull.Value : DateTime.Parse(request.MoveOutDate!).Date);
+        cmd.Parameters.AddWithValue("@DormBuilding", string.IsNullOrWhiteSpace(request.DormBuilding) ? DBNull.Value : request.DormBuilding.Trim());
+        cmd.Parameters.AddWithValue("@SuiteLetter", string.IsNullOrWhiteSpace(request.SuiteLetter) ? DBNull.Value : request.SuiteLetter.Trim().ToUpperInvariant()[0].ToString());
+        cmd.Parameters.Add(
+            new MySqlParameter("@AvatarUrl", MySqlDbType.LongText)
+            {
+                Value = string.IsNullOrWhiteSpace(request.AvatarUrl) ? DBNull.Value : request.AvatarUrl.Trim(),
+            });
+
+        var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return rows > 0;
     }
 
     /// <summary>Returns new user id, or null if email already exists.</summary>

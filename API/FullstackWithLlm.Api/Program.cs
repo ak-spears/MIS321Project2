@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using MySqlConnector;
+using System.Text.Json;
 
 EnvLoader.LoadLocalEnvFromUpwards(".env");
 
@@ -16,7 +17,10 @@ var builder = WebApplication.CreateBuilder(args);
 DatabaseUrlResolver.ApplyIfNeeded(builder.Configuration);
 LocalDevConnectionStringFix.Apply(builder);
 
-builder.Services.AddControllers();
+builder.Services.AddControllers().AddJsonOptions(o =>
+{
+    o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+});
 builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();
 builder.Services.AddScoped<ListingRepository>();
@@ -61,7 +65,11 @@ builder.Services.AddCors(options =>
                 string.IsNullOrWhiteSpace(origin) ||
                 origin.Equals("null", StringComparison.OrdinalIgnoreCase) ||
                 origin.Equals("http://127.0.0.1:5500", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase))
+                origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase) ||
+                origin.Equals("http://127.0.0.1:5147", StringComparison.OrdinalIgnoreCase) ||
+                origin.Equals("http://localhost:5147", StringComparison.OrdinalIgnoreCase) ||
+                origin.Equals("http://127.0.0.1:5148", StringComparison.OrdinalIgnoreCase) ||
+                origin.Equals("http://localhost:5148", StringComparison.OrdinalIgnoreCase))
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -77,19 +85,61 @@ app.UseExceptionHandler(errorApp =>
         var feature = context.Features.Get<IExceptionHandlerFeature>();
         var ex = feature?.Error;
 
-        if (ex is MySqlException mx)
+        static MySqlException? FindMySqlException(Exception? e)
         {
+            for (; e != null; e = e.InnerException)
+            {
+                if (e is MySqlException mx)
+                {
+                    return mx;
+                }
+            }
+
+            return null;
+        }
+
+        if (FindMySqlException(ex) is { } mx)
+        {
+            // BadFieldError = unknown column / schema drift — not a connection outage.
+            if (mx.ErrorCode == MySqlErrorCode.BadFieldError || mx.Number == 1054)
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                var detail = app.Environment.IsDevelopment()
+                    ? $"[{mx.ErrorCode}] {mx.Message} Apply database scripts (e.g. database/alter_listings_fulfillment.sql) so columns match the API, or rely on the API minimal listing insert path."
+                    : "Database schema does not match the application.";
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    title = "Database schema error",
+                    detail,
+                });
+                return;
+            }
+
+            if (mx.ErrorCode == MySqlErrorCode.DataTooLong || mx.Number == 1406)
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                var detail = app.Environment.IsDevelopment()
+                    ? $"[{mx.ErrorCode}] {mx.Message} Listing photos need a wide column: run database/alter_listings_image_url_mediumtext.sql (MEDIUMTEXT). The app also compresses images on upload."
+                    : "Stored value too large for the database column.";
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    title = "Database column too small",
+                    detail,
+                });
+                return;
+            }
+
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             var baseDetail =
                 "Could not connect to MySQL. Check ConnectionStrings__DefaultConnection in .env, or DATABASE_URL / JAWSDB_URL "
                 + "(mysql://… from Heroku). For AWS RDS, allow inbound TCP 3306 from your public IP in the RDS security group. ";
-            var detail = app.Environment.IsDevelopment()
+            var connDetail = app.Environment.IsDevelopment()
                 ? baseDetail + $"[{mx.ErrorCode}] {mx.Message}"
                 : baseDetail.TrimEnd();
             await context.Response.WriteAsJsonAsync(new
             {
                 title = "Database unavailable",
-                detail,
+                detail = connDetail,
             });
             return;
         }

@@ -78,6 +78,21 @@ body {
     box-shadow: var(--cdm-shadow);
 }
 
+.cdm-nav-avatar {
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.cdm-avatar-preview {
+    object-fit: cover;
+    background: #fff;
+}
+
+/* Dev-only API health pill — hidden in UI */
+#api-pill {
+    display: none !important;
+}
+
 .cdm-page {
     max-width: 1200px;
 }
@@ -409,6 +424,27 @@ body {
     background: #f6f7f9;
     border-color: rgba(158, 27, 50, 0.18);
     transform: translateY(-1px);
+}
+
+/* Home sidebar: Bootstrap dropdowns with checkbox lists */
+#cdm-feed-filters .dropdown .btn {
+    text-align: left;
+    background: #fbfbfc;
+    border-color: rgba(17, 24, 39, 0.08);
+}
+#cdm-feed-filters .dropdown .btn:hover,
+#cdm-feed-filters .dropdown .btn:focus,
+#cdm-feed-filters .dropdown.show > .btn {
+    background: #fff;
+    border-color: rgba(158, 27, 50, 0.22);
+}
+.cdm-filter-menu {
+    max-height: min(320px, 55vh);
+    overflow-y: auto;
+    border-radius: 12px !important;
+}
+.cdm-filter-menu .form-check:last-child {
+    margin-bottom: 0;
 }
 
 .cdm-linklist a {
@@ -1111,4 +1147,93 @@ body {
     background: #fff;
     border: 1px dashed rgba(0, 0, 0, 0.12);
     border-radius: 18px;
+}
+
+/* Listing detail — eBay-style gallery + buy box */
+.cdm-listing-gallery {
+    background: #fff;
+    border: 1px solid var(--cdm-border);
+    border-radius: var(--cdm-radius);
+    padding: 1rem;
+    min-height: 280px;
+}
+
+.cdm-photo-hero--listing {
+    display: block;
+    max-height: min(520px, 70vh);
+    width: 100%;
+    object-fit: contain;
+    background: #fafafa;
+    border-radius: 12px;
+}
+
+.cdm-listing-gallery-empty {
+    min-height: 320px;
+    border-radius: 12px;
+    background: linear-gradient(145deg, #f3f4f6, #e5e7eb);
+}
+
+.cdm-listing-price .display-6 {
+    font-size: clamp(1.75rem, 4vw, 2.35rem);
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+}
+
+.cdm-price-currency {
+    font-size: 1.25rem;
+    font-weight: 600;
+    vertical-align: 0.15em;
+}
+
+.cdm-listing-seller-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.7rem;
+    padding: 0.65rem 0.85rem;
+    border-radius: 12px;
+    background: #f9fafb;
+    border: 1px solid var(--cdm-border);
+    font-size: 0.92rem;
+}
+
+.cdm-listing-seller-label {
+    font-size: 0.68rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+}
+
+.cdm-listing-meta dt {
+    font-weight: 500;
+}
+
+.cdm-listing-buybox.cdm-card:hover {
+    transform: none;
+    border-color: rgba(229, 231, 235, 0.95);
+}
+
+.cdm-listing-about,
+.cdm-listing-buybox {
+    box-shadow: 0 8px 28px rgba(17, 24, 39, 0.06);
+}
+
+.cdm-listing-specifics-head {
+    letter-spacing: 0.06em;
+    font-weight: 650;
+}
+
+.cdm-listing-fulfillment {
+    background: #fafafa;
+    border-color: var(--cdm-border) !important;
+}
+
+.cdm-listing-fulfillment-h {
+    font-size: 0.68rem;
+    font-weight: 650;
+    letter-spacing: 0.07em;
+}
+
+.listing-description {
+    white-space: pre-wrap;
+    line-height: 1.6;
 }

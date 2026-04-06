@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
     campus_id    INT            NOT NULL,
     email        VARCHAR(150)   NOT NULL UNIQUE,
     display_name VARCHAR(60)    NOT NULL,
-    avatar_url   VARCHAR(500)   DEFAULT NULL,
+    avatar_url   MEDIUMTEXT     DEFAULT NULL,
     avg_rating   DECIMAL(3,2)   NOT NULL DEFAULT 0.00,
     rating_count INT            NOT NULL DEFAULT 0,
     created_at   DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- LISTINGS
 -- Items posted for sale, scoped to a campus.
 -- ============================================================
+-- Delivery / transfer: gap_solution = storage | pickup_window | ship_or_deliver (matches POST body gapSolution).
 CREATE TABLE IF NOT EXISTS listings (
     listing_id  INT            NOT NULL AUTO_INCREMENT,
     campus_id   INT            NOT NULL,
@@ -49,6 +50,13 @@ CREATE TABLE IF NOT EXISTS listings (
     description TEXT           DEFAULT NULL,
     price       DECIMAL(8,2)   NOT NULL DEFAULT 0.00,
     category    VARCHAR(50)    DEFAULT NULL,
+    gap_solution   VARCHAR(32) DEFAULT NULL,
+    storage_notes  TEXT        DEFAULT NULL,
+    pickup_start   DATE        DEFAULT NULL,
+    pickup_end     DATE        DEFAULT NULL,
+    pickup_location VARCHAR(255) DEFAULT NULL,
+    delivery_notes TEXT        DEFAULT NULL,
+    image_url   MEDIUMTEXT     DEFAULT NULL,
     status      ENUM('active','pending','sold','removed') NOT NULL DEFAULT 'active',
     created_at  DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (listing_id),
