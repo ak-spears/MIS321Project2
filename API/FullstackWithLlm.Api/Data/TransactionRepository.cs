@@ -36,18 +36,19 @@ public sealed class TransactionRepository
             limit = 200;
         }
 
+        // LEFT JOIN so a transaction row still appears if the listing row was removed (INNER JOIN hid rows).
         const string sql = """
             SELECT
                 t.transaction_id,
                 t.listing_id,
-                l.title,
+                COALESCE(l.title, '(listing unavailable)') AS title,
                 t.amount,
                 t.platform_fee,
                 t.payment_method,
                 t.status,
                 t.created_at
             FROM transactions t
-            INNER JOIN listings l ON l.listing_id = t.listing_id
+            LEFT JOIN listings l ON l.listing_id = t.listing_id
             WHERE t.buyer_id = @buyer_id
             ORDER BY t.created_at DESC
             LIMIT @limit;
@@ -168,6 +169,12 @@ public sealed class TransactionRepository
             {
                 var scalar = await idCmd.ExecuteScalarAsync(cancellationToken);
                 newId = Convert.ToInt32(scalar);
+            }
+
+            if (newId <= 0)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return null;
             }
 
             const string updateSql = """

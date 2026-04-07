@@ -1,11 +1,15 @@
+using System.Text.Json.Serialization;
+
 namespace FullstackWithLlm.Api.Models;
 
 public sealed class CreateTransactionRequest
 {
     /// <summary>Published listing to buy or claim (free).</summary>
+    [JsonPropertyName("listingId")]
     public int ListingId { get; set; }
 
     /// <summary>cash | card — in-app settlement is peer-to-peer; this is for record-keeping.</summary>
+    [JsonPropertyName("paymentMethod")]
     public string PaymentMethod { get; set; } = "cash";
 }
 

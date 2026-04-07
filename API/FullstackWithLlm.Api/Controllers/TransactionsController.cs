@@ -69,6 +69,7 @@ public sealed class TransactionsController : ControllerBase
                 "That listing is not available to buy or claim. It may be sold, removed, or yours already.");
         }
 
-        return CreatedAtAction(nameof(GetMine), new { limit = 48 }, row);
+        // Explicit 201 + body so clients always receive transactionId (CreatedAtAction can omit body in some setups).
+        return StatusCode(StatusCodes.Status201Created, row);
     }
 }

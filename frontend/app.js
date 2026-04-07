@@ -21,6 +21,26 @@ const API_BASE = (function resolveApiBase() {
     return "http://localhost:5147";
 })();
 
+/**
+ * Prefer API listing id on the checkout context; fall back to `db:123` key so
+ * POST /api/transactions still runs if JSON used a different property name.
+ */
+function resolveNumericListingIdFromCheckoutContext(ctx) {
+    if (!ctx) return NaN;
+    const raw = ctx.listingId ?? ctx.ListingId;
+    if (raw != null && raw !== "") {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
+    const key = ctx.key != null ? String(ctx.key) : "";
+    const m = /^db:(\d+)$/.exec(key.trim());
+    if (m) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
+    return NaN;
+}
+
 /** Shown when fetch throws (usually API not running or wrong API_BASE). */
 function formatAuthNetworkError() {
     const target = API_BASE === "" ? window.location.origin : API_BASE;
@@ -281,13 +301,6 @@ function loadLocalTransactions() {
     }
 }
 
-function saveLocalTransaction(entry) {
-    const list = loadLocalTransactions();
-    list.unshift(entry);
-    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
-    return entry;
-}
-
 function clearLocalTransactions() {
     localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
 }
@@ -306,13 +319,15 @@ function mapServerTransactionToRow(d) {
             createdAt = new Date().toISOString();
         }
     }
+    const lid = d.listingId ?? d.ListingId;
+    const tid = d.transactionId ?? d.TransactionId;
     return {
-        id: `srv-${d.transactionId}`,
+        id: `srv-${tid}`,
         fromServer: true,
         createdAt: createdAt || new Date().toISOString(),
         title: d.title,
-        listingKey: `db:${d.listingId}`,
-        listingId: d.listingId,
+        listingKey: `db:${lid}`,
+        listingId: lid,
         kind: isPurchase ? "purchase" : "claim",
         listPrice: amount,
         platformFee: Number(d.platformFee) || 0,
@@ -702,7 +717,8 @@ async function fetchFeedItemsForHome() {
                 .filter((row) => {
                     const sid = row.sellerId ?? row.SellerId;
                     if (myId == null) return true;
-                    if (sid == null || sid === "") return false;
+                    // If seller id missing, keep row (server already excludes your listings when authed).
+                    if (sid == null || sid === "") return true;
                     return Number(sid) !== myId;
                 })
                 .map((row) => {
@@ -755,18 +771,35 @@ async function fetchFeedItemsForHome() {
             payment: x.payment === "card" ? "card" : "cash",
         };
     });
-    if (!state.token) {
+    const fillSampleThumbs = () => {
         sample.forEach((x) => {
             state.feedThumbSrcByKey[x.key] = x.photoDataUrl;
         });
+    };
+    // Logged out: DB rows + demo preview cards. Logged in: MySQL-backed rows only — never sample cards,
+    // so "Buy" always maps to a real listing_id and POST /api/transactions can persist.
+    if (!state.token) {
+        fillSampleThumbs();
+        return [...dbCards, ...sample].slice(0, 9);
     }
-    return state.token ? dbCards.slice(0, 9) : [...dbCards, ...sample].slice(0, 9);
+    return dbCards.slice(0, 9);
 }
 
 async function buildHomeFeedRowsHtml() {
     const items = await fetchFeedItemsForHome();
     state.feedItemsCache = items;
-    return applyFeedFilters(items).map(homeFeedCardHtml).join("");
+    const filtered = applyFeedFilters(items);
+    if (filtered.length === 0 && state.token) {
+        return `<div class="col-12"><div class="cdm-card p-4 p-lg-5 text-center">
+            <p class="fw-semibold text-dark mb-2">No other students’ listings to show yet</p>
+            <p class="cdm-muted small mb-3 mb-lg-4">While you’re signed in, only <strong>real posts from the database</strong> appear here — so checkout always updates MySQL. Ask a teammate to post, or switch accounts to see your own tests.</p>
+            <button type="button" class="btn cdm-btn-crimson btn-sm" data-action="post-item">Post an item</button>
+        </div></div>`;
+    }
+    if (filtered.length === 0) {
+        return `<div class="col-12"><div class="cdm-card p-5 text-center cdm-muted">No listings match these filters. Try clearing filters or widening your selections.</div></div>`;
+    }
+    return filtered.map(homeFeedCardHtml).join("");
 }
 
 function refreshHomeFeedGrid() {
@@ -998,8 +1031,24 @@ async function apiJson(path, options) {
             ...authHeaders(),
         },
     });
-    const data = await res.json().catch(() => ({}));
+    const text = await res.text();
+    let data = {};
+    if (text && text.trim()) {
+        try {
+            data = JSON.parse(text);
+        } catch {
+            data = {};
+        }
+    }
     return { res, data };
+}
+
+/** From POST/GET transaction DTO (camelCase, PascalCase, or snake_case). */
+function parseTransactionIdFromApiPayload(data) {
+    if (!data || typeof data !== "object") return null;
+    const raw = data.transactionId ?? data.TransactionId ?? data.transaction_id;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** Bundled default avatar (your uploaded elephant art) — served as static file from the API. */
@@ -2281,7 +2330,11 @@ async function renderHome() {
                             <div class="d-flex align-items-end justify-content-between gap-3 mb-2">
                                 <div>
                                     <div class="h5 mb-0">Matched feed (preview)</div>
-                                    <div class="cdm-muted small">Live rows from MySQL when the API is up; demo cards when logged out. Filters apply instantly on this page.</div>
+                                    <div class="cdm-muted small">${
+                                        state.token
+                                            ? "Signed in: only <strong>live MySQL listings</strong> (no sample cards) — checkout writes to the database."
+                                            : "Logged out: sample cards are UI previews only. Sign in and use real listings for SQL-backed checkout."
+                                    } Filters apply instantly on this page.</div>
                                 </div>
                                 <div class="d-flex align-items-center gap-2">
                                     <span class="cdm-muted small d-none d-md-inline">Sort</span>
@@ -3134,13 +3187,25 @@ function renderListingDbFromApi(L) {
     const pickupStartIso =
         L.pickupStart != null ? new Date(L.pickupStart).toISOString().slice(0, 10) : null;
     const pickupEndIso = L.pickupEnd != null ? new Date(L.pickupEnd).toISOString().slice(0, 10) : null;
+    const idFromApi = L.listingId ?? L.ListingId;
+    const idFromKey =
+        state.listingKey && String(state.listingKey).startsWith("db:")
+            ? Number(String(state.listingKey).slice(3))
+            : NaN;
+    const listingIdResolved =
+        Number.isFinite(Number(idFromApi)) && Number(idFromApi) > 0
+            ? Number(idFromApi)
+            : Number.isFinite(idFromKey) && idFromKey > 0
+              ? idFromKey
+              : null;
+
     state.lastListingCheckoutSnap = {
         listingKey: state.listingKey,
         title: L.title,
         price: priceNum,
         sellerDisplayName: L.sellerDisplayName || "Seller",
         imageUrl: L.imageUrl ?? L.ImageUrl,
-        listingId: L.listingId,
+        listingId: listingIdResolved,
         isMine: false,
         gapSolution: L.gapSolution ?? L.GapSolution ?? null,
         pickupStart: pickupStartIso,
@@ -3499,20 +3564,36 @@ function wireCheckoutPage(root) {
             return;
         }
         const isSale = ctx.price > 0;
-        const listingIdNum = ctx.listingId != null ? Number(ctx.listingId) : NaN;
+        const listingIdNum = resolveNumericListingIdFromCheckoutContext(ctx);
         const useApi = Number.isFinite(listingIdNum) && listingIdNum > 0;
 
         const btn = root.querySelector("#checkout-confirm-btn");
         const label = isSale ? "Confirm purchase" : "Claim item";
+        let serverBacked = false;
+        /** @type {number | null} */
+        let savedTransactionId = null;
+        /** @type {number | null} */
+        let savedListingIdForTx = null;
         if (useApi) {
             if (btn) {
                 btn.disabled = true;
                 btn.textContent = "Confirming…";
             }
-            const { res, data } = await apiJson("/api/transactions", {
-                method: "POST",
-                body: JSON.stringify({ listingId: listingIdNum, paymentMethod: "cash" }),
-            });
+            let res;
+            let data;
+            try {
+                ({ res, data } = await apiJson("/api/transactions", {
+                    method: "POST",
+                    body: JSON.stringify({ listingId: listingIdNum, paymentMethod: "cash" }),
+                }));
+            } catch {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = label;
+                }
+                alert(formatAuthNetworkError());
+                return;
+            }
             if (btn) {
                 btn.disabled = false;
                 btn.textContent = label;
@@ -3534,22 +3615,44 @@ function wireCheckoutPage(root) {
                 alert(msg);
                 return;
             }
+            serverBacked = true;
+            savedListingIdForTx = listingIdNum;
+            savedTransactionId = parseTransactionIdFromApiPayload(data);
+            /** @type {{ res: Response; data: unknown } | null} */
+            let minePoll = null;
+            if (savedTransactionId == null) {
+                minePoll = await apiJson("/api/transactions/mine?limit=48");
+                if (minePoll.res.ok && Array.isArray(minePoll.data)) {
+                    const match = minePoll.data.find((t) => Number(t.listingId ?? t.ListingId) === listingIdNum);
+                    if (match) {
+                        savedTransactionId = parseTransactionIdFromApiPayload(match);
+                    } else if (minePoll.data.length > 0) {
+                        savedTransactionId = parseTransactionIdFromApiPayload(minePoll.data[0]);
+                    }
+                }
+            }
+            // POST succeeded but no row visible for this account → wrong DB, wrong user, or client/parser drift.
+            if (savedTransactionId == null && minePoll?.res?.ok && Array.isArray(minePoll.data) && minePoll.data.length === 0) {
+                alert(
+                    "The server accepted checkout, but your account still has no transactions. Usually: (1) the API is connected to a different MySQL than Workbench, (2) you’re not signed in as the buyer, or (3) checkout used a demo listing (sample:*), which never hits the database.",
+                );
+                return;
+            }
         } else {
-            saveLocalTransaction({
-                id: crypto.randomUUID(),
-                createdAt: new Date().toISOString(),
-                title: ctx.title,
-                listingKey: ctx.key,
-                listingId: ctx.listingId,
-                kind: isSale ? "purchase" : "claim",
-                listPrice: ctx.price,
-                platformFee: isSale ? platformFeeFromSale(ctx.price) : 0,
-                sellerNet: isSale ? sellerNetFromSale(ctx.price) : 0,
-                status: "awaiting_chat",
-            });
+            // No numeric listing id → UI sample / stale context; cannot INSERT into transactions (FK).
+            alert(
+                "This item is a preview only (not in MySQL), so checkout cannot create a transaction row. Go to Home and open a listing posted by another student — it loads from the API and shows a listing #. Then confirm checkout.",
+            );
+            return;
         }
 
-        state.checkoutSuccess = { title: ctx.title, isSale };
+        state.checkoutSuccess = {
+            title: ctx.title,
+            isSale,
+            serverBacked,
+            transactionId: savedTransactionId,
+            listingId: savedListingIdForTx,
+        };
         state.checkoutContext = null;
         state.view = "checkout-success";
         render();
@@ -3567,8 +3670,9 @@ function renderCheckout() {
     }
 
     const isSale = ctx.price > 0;
-    const listingIdNum = ctx.listingId != null ? Number(ctx.listingId) : NaN;
+    const listingIdNum = resolveNumericListingIdFromCheckoutContext(ctx);
     const persistServer = Number.isFinite(listingIdNum) && listingIdNum > 0;
+    const signedInNoDbListing = Boolean(state.token && !persistServer);
     const thumb =
         ctx.imageUrl && String(ctx.imageUrl).trim()
             ? `<div class="cdm-checkout-thumb-wrap"><img alt="" src="${escapeHtml(String(ctx.imageUrl).trim())}" /></div>`
@@ -3697,7 +3801,9 @@ function renderCheckout() {
                 <li><strong>Confirm:</strong> ${
                     persistServer
                         ? "we save this to your account and the listing is marked sold in the database."
-                        : "we add this to your Transactions list (demo: this browser only)."
+                        : signedInNoDbListing
+                          ? "only runs for listings that exist in MySQL — go Home and open an item from the live feed (not a UI sample)."
+                          : "we add this to your Transactions list (demo: this browser only)."
                 }</li>
                 <li><strong>Chat:</strong> message the seller to lock in pickup; be specific about day/time.</li>
                 <li><strong>Handoff:</strong> meet up, inspect the item, done. Formal “received” / dispute flow is TBD.</li>
@@ -3753,6 +3859,13 @@ function renderCheckout() {
                 <div class="container-fluid cdm-checkout-max px-3 px-lg-4 pt-4 pb-5">
                     <button type="button" class="cdm-checkout-back mb-3" data-action="back-checkout">‹ ${isSale ? "Listing" : "Back"}</button>
                     ${checkoutProgressHtml("review")}
+                    ${
+                        signedInNoDbListing
+                            ? `<div class="alert alert-warning border-0 shadow-sm mb-3" role="alert">
+                        <strong>Not a database listing.</strong> Signed-in checkout only writes to MySQL when this page was opened from a <strong>real feed item</strong> (numeric listing id). Go back to Home — you should only see live rows while signed in.
+                    </div>`
+                            : ""
+                    }
                     <h1 class="cdm-checkout-hero-title">${heroTitle}</h1>
                     <p class="cdm-checkout-hero-kicker mb-3 pb-lg-1">${heroKicker}</p>
                     ${missionWhyCollapsible}
@@ -3784,7 +3897,9 @@ function renderCheckout() {
                                     ${
                                         persistServer
                                             ? "Confirm writes to the database via <code>POST /api/transactions</code> (Heroku MySQL when deployed)."
-                                            : "Demo: saved in this browser only. Open a <strong>live feed listing</strong> for server-backed checkout."
+                                            : signedInNoDbListing
+                                              ? "Cannot write to MySQL without a real <code>listing_id</code>. Use Home → open a classmate’s post → confirm here."
+                                              : "Demo: saved in this browser only. Sign in and use a <strong>live feed listing</strong> for SQL-backed checkout."
                                     }
                                 </p>
                             </div>
@@ -3804,6 +3919,13 @@ function renderCheckout() {
     root.appendChild(shell);
     wireNav(shell);
     wireCheckoutPage(shell);
+    if (signedInNoDbListing) {
+        const btn = root.querySelector("#checkout-confirm-btn");
+        if (btn) {
+            btn.disabled = true;
+            btn.setAttribute("aria-disabled", "true");
+        }
+    }
     ensureAuthUi();
 }
 
@@ -3850,10 +3972,33 @@ function renderCheckoutSuccess() {
                     <div class="cdm-checkout-success-card text-center mx-auto" style="max-width: 28rem">
                         <div class="cdm-checkout-success-icon mx-auto mb-3" aria-hidden="true">✓</div>
                         <h1 class="cdm-checkout-hero-title mb-2">You’re in</h1>
-                        <p class="cdm-checkout-hero-kicker mx-auto mb-4">
+                        <p class="cdm-checkout-hero-kicker mx-auto mb-3">
                             Your ${s.isSale ? "purchase" : "free claim"} of
-                            <span class="fw-semibold text-body">${escapeHtml(s.title)}</span> is saved. Next step: talk to the seller.
+                            <span class="fw-semibold text-body">${escapeHtml(s.title)}</span> is saved.
+                            ${
+                                s.serverBacked
+                                    ? " It’s on your account in the database (see <strong>Transactions</strong>)."
+                                    : " <strong>Demo only</strong> — saved in this browser. Open a listing whose key starts with <code>db:</code> and confirm again to write to MySQL."
+                            }
+                            Next step: talk to the seller.
                         </p>
+                        ${
+                            s.serverBacked
+                                ? `<div class="alert alert-light border text-start small mb-4 mx-auto text-body" style="max-width: 26rem" role="status">
+                            <div class="fw-semibold mb-1">Saved to MySQL</div>
+                            ${
+                                s.transactionId != null
+                                    ? `<p class="mb-1">Use this to verify in Workbench: <code class="user-select-all">transaction_id = ${escapeHtml(String(s.transactionId))}</code>${
+                                          s.listingId != null
+                                              ? ` · <code class="user-select-all">listing_id = ${escapeHtml(String(s.listingId))}</code>`
+                                              : ""
+                                      }</p>
+                            <p class="mb-0 text-muted">Run <code class="small">SELECT * FROM transactions WHERE transaction_id = ${escapeHtml(String(s.transactionId))};</code> The empty row marked <code>*</code> in the grid is only for typing a <em>new</em> row — it is not your checkout.</p>`
+                                    : `<p class="mb-0 text-muted">Open <strong>Transactions</strong> in this app — the row is in the same database your API uses.</p>`
+                            }
+                        </div>`
+                                : ""
+                        }
                         <button type="button" class="btn btn-outline-secondary w-100 rounded-pill py-2 mb-2" disabled id="checkout-success-chat">
                             Open chat (coming soon)
                         </button>

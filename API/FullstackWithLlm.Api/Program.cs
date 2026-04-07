@@ -20,6 +20,8 @@ LocalDevConnectionStringFix.Apply(builder);
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
     o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    // POST bodies from the SPA use camelCase; bind even if casing drifts.
+    o.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
 });
 builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();

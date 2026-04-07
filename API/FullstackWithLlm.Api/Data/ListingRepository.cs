@@ -315,7 +315,15 @@ public sealed class ListingRepository
             }
             catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
             {
-                await InsertListingRowMinimalAsync(conn, sellerId, campusId, request, cancellationToken);
+                try
+                {
+                    await InsertListingRowMinimalAsync(conn, sellerId, campusId, request, cancellationToken);
+                }
+                catch (Exception ex3) when (AsMySqlException(ex3) is { } mx3 && IsUnknownColumnOrBadFieldError(mx3))
+                {
+                    // DB has no image_url column — persist text fields only (photos skipped).
+                    await InsertListingRowBareAsync(conn, sellerId, campusId, request, cancellationToken);
+                }
             }
         }
 
@@ -460,6 +468,36 @@ public sealed class ListingRepository
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>Core columns only — for schemas with no <c>image_url</c> column.</summary>
+    private static async Task InsertListingRowBareAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int campusId,
+        CreateListingRequest request,
+        CancellationToken cancellationToken)
+    {
+        const string insertSql = """
+            INSERT INTO listings (
+                campus_id, seller_id, title, description, price, category,
+                status
+            )
+            VALUES (
+                @campus_id, @seller_id, @title, @description, @price, @category,
+                'active'
+            );
+            """;
+
+        await using var cmd = new MySqlCommand(insertSql, conn);
+        cmd.Parameters.AddWithValue("@campus_id", campusId);
+        cmd.Parameters.AddWithValue("@seller_id", sellerId);
+        cmd.Parameters.AddWithValue("@title", request.Title.Trim());
+        cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
+        cmd.Parameters.AddWithValue("@price", request.Price);
+        cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static DateTime? ParseOptionalDate(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
@@ -514,7 +552,14 @@ public sealed class ListingRepository
             }
             catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
             {
-                return await UpdateListingRowMinimalAsync(conn, sellerId, listingId, request, cancellationToken);
+                try
+                {
+                    return await UpdateListingRowMinimalAsync(conn, sellerId, listingId, request, cancellationToken);
+                }
+                catch (Exception ex3) when (AsMySqlException(ex3) is { } mx3 && IsUnknownColumnOrBadFieldError(mx3))
+                {
+                    return await UpdateListingRowBareAsync(conn, sellerId, listingId, request, cancellationToken);
+                }
             }
         }
     }
@@ -632,6 +677,34 @@ public sealed class ListingRepository
             {
                 Value = string.IsNullOrWhiteSpace(request.ImageUrl) ? DBNull.Value : request.ImageUrl.Trim(),
             });
+
+        var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return n > 0;
+    }
+
+    private static async Task<bool> UpdateListingRowBareAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int listingId,
+        CreateListingRequest request,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            UPDATE listings SET
+                title = @title,
+                description = @description,
+                price = @price,
+                category = @category
+            WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
+            """;
+
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@lid", listingId);
+        cmd.Parameters.AddWithValue("@sid", sellerId);
+        cmd.Parameters.AddWithValue("@title", request.Title.Trim());
+        cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
+        cmd.Parameters.AddWithValue("@price", request.Price);
+        cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
 
         var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
         return n > 0;
