@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 
 # Build outputs
 **/bin/

@@ -24,6 +24,7 @@ builder.Services.AddControllers().AddJsonOptions(o =>
 builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();
 builder.Services.AddScoped<ListingRepository>();
+builder.Services.AddScoped<TransactionRepository>();
 builder.Services.AddSingleton<JwtTokenService>();
 
 var jwtKey = builder.Configuration["Jwt:SigningKey"];
@@ -62,14 +63,25 @@ builder.Services.AddCors(options =>
             // Your browser sends `Origin: null` when `index.html` is opened directly (file://...).
             // Accept that in dev so fetch() and preflights succeed.
             .SetIsOriginAllowed(origin =>
-                string.IsNullOrWhiteSpace(origin) ||
-                origin.Equals("null", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://127.0.0.1:5500", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://127.0.0.1:5147", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5147", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://127.0.0.1:5148", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5148", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(origin) || origin.Equals("null", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (Uri.TryCreate(origin, UriKind.Absolute, out var u) &&
+                    u.Host.EndsWith(".herokuapp.com", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                return origin.Equals("http://127.0.0.1:5500", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://127.0.0.1:5147", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://localhost:5147", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://127.0.0.1:5148", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://localhost:5148", StringComparison.OrdinalIgnoreCase);
+            })
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -104,8 +116,14 @@ app.UseExceptionHandler(errorApp =>
             if (mx.ErrorCode == MySqlErrorCode.BadFieldError || mx.Number == 1054)
             {
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                var hint = mx.Message.Contains("display_name", StringComparison.OrdinalIgnoreCase)
+                    ? " Run database/alter_users_display_name.sql (adds users.display_name)."
+                    : mx.Message.Contains("gap_solution", StringComparison.OrdinalIgnoreCase) ||
+                      mx.Message.Contains("pickup_", StringComparison.OrdinalIgnoreCase)
+                        ? " Run database/alter_listings_fulfillment.sql."
+                        : " Run scripts under database/ (see marketplace_schema.sql) so columns match the API.";
                 var detail = app.Environment.IsDevelopment()
-                    ? $"[{mx.ErrorCode}] {mx.Message} Apply database scripts (e.g. database/alter_listings_fulfillment.sql) so columns match the API, or rely on the API minimal listing insert path."
+                    ? $"[{mx.ErrorCode}] {mx.Message}{hint}"
                     : "Database schema does not match the application.";
                 await context.Response.WriteAsJsonAsync(new
                 {
@@ -155,15 +173,13 @@ app.UseExceptionHandler(errorApp =>
 
 app.UseCors("Frontend");
 
-if (app.Environment.IsDevelopment())
+// Serve `frontend/` (repo root) in dev and on Heroku so one dyno hosts SPA + API. Same-origin → empty API_BASE in app.js.
+var frontendPath = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend"));
+if (Directory.Exists(frontendPath))
 {
-    var frontendPath = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend"));
-    if (Directory.Exists(frontendPath))
-    {
-        var files = new PhysicalFileProvider(frontendPath);
-        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-        app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
-    }
+    var files = new PhysicalFileProvider(frontendPath);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 }
 
 app.UseAuthentication();

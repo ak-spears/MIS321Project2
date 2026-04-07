@@ -38,7 +38,10 @@ public sealed class ListingRepository
         }
         catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
         {
-            return await ReadFeedMinimalAsync(conn, limit, campusId, excludeSellerId, cancellationToken);
+            // Failed SELECT can poison the connection; minimal query avoids l.image_url for DBs without that column.
+            await using var conn2 = new MySqlConnection(_connectionString);
+            await conn2.OpenAsync(cancellationToken);
+            return await ReadFeedMinimalAsync(conn2, limit, campusId, excludeSellerId, cancellationToken);
         }
     }
 
@@ -62,7 +65,7 @@ public sealed class ListingRepository
                 l.image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.status = 'active'
@@ -103,10 +106,10 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.image_url,
+                CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.status = 'active'
@@ -145,7 +148,9 @@ public sealed class ListingRepository
         }
         catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
         {
-            return await ReadMineMinimalAsync(conn, sellerId, limit, cancellationToken);
+            await using var conn2 = new MySqlConnection(_connectionString);
+            await conn2.OpenAsync(cancellationToken);
+            return await ReadMineMinimalAsync(conn2, sellerId, limit, cancellationToken);
         }
     }
 
@@ -168,7 +173,7 @@ public sealed class ListingRepository
                 l.image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.seller_id = @seller_id
@@ -206,10 +211,10 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.image_url,
+                CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.seller_id = @seller_id
@@ -672,7 +677,7 @@ public sealed class ListingRepository
                 l.image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.listing_id = @id
@@ -731,10 +736,10 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.image_url,
+                CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.listing_id = @id

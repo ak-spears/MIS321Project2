@@ -1,10 +1,37 @@
 /* Campus Dorm Marketplace frontend app logic goes here. */
 
-/** Same origin when UI is served from the API (dev: ports 5147 / 5148); else Live Server → API on 5147. */
-const API_BASE =
-    typeof window !== "undefined" && (window.location.port === "5147" || window.location.port === "5148")
-        ? ""
-        : "http://localhost:5147";
+/**
+ * API origin. Override with &lt;meta name="cdm-api-base" content="https://your-api.herokuapp.com" /&gt; if UI and API differ.
+ * Same Heroku app (or dotnet on 5147/5148): empty string → same origin.
+ * Live Server / local file: http://localhost:5147
+ */
+const API_BASE = (function resolveApiBase() {
+    if (typeof window === "undefined") return "";
+    const meta = document.querySelector('meta[name="cdm-api-base"]');
+    const fromMeta = meta?.getAttribute("content")?.trim();
+    if (fromMeta) return fromMeta.replace(/\/$/, "");
+
+    const host = window.location.hostname;
+    const port = window.location.port;
+    if (port === "5147" || port === "5148") return "";
+    if (host.endsWith("herokuapp.com")) return "";
+    if (host === "localhost" || host === "127.0.0.1") {
+        return `http://${host === "127.0.0.1" ? "127.0.0.1" : "localhost"}:5147`;
+    }
+    return "http://localhost:5147";
+})();
+
+/** Shown when fetch throws (usually API not running or wrong API_BASE). */
+function formatAuthNetworkError() {
+    const target = API_BASE === "" ? window.location.origin : API_BASE;
+    return (
+        `Cannot reach the API (${target}). ` +
+        `Start it from the project folder: dotnet run --project API/FullstackWithLlm.Api/FullstackWithLlm.Api.csproj ` +
+        `— then open http://localhost:5147 or keep your current page if the API is already on 5147. ` +
+        `Testing Heroku? Set the cdm-api-base meta tag to your app URL.`
+    );
+}
+
 const TOKEN_KEY = "cdm_jwt";
 
 function getStoredToken() {
@@ -265,9 +292,38 @@ function clearLocalTransactions() {
     localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
 }
 
+/** Maps GET /api/transactions/mine row → UI row (matches localStorage shape). */
+function mapServerTransactionToRow(d) {
+    const amount = Number(d.amount);
+    const isPurchase = amount > 0;
+    const st = String(d.status || "").toLowerCase();
+    const uiStatus = st === "pending" ? "awaiting_chat" : st;
+    let createdAt = d.createdAt;
+    if (createdAt != null && typeof createdAt !== "string") {
+        try {
+            createdAt = new Date(createdAt).toISOString();
+        } catch {
+            createdAt = new Date().toISOString();
+        }
+    }
+    return {
+        id: `srv-${d.transactionId}`,
+        fromServer: true,
+        createdAt: createdAt || new Date().toISOString(),
+        title: d.title,
+        listingKey: `db:${d.listingId}`,
+        listingId: d.listingId,
+        kind: isPurchase ? "purchase" : "claim",
+        listPrice: amount,
+        platformFee: Number(d.platformFee) || 0,
+        sellerNet: isPurchase ? amount - (Number(d.platformFee) || 0) : 0,
+        status: uiStatus,
+    };
+}
+
 function transactionStatusLabel(status) {
     const s = String(status || "").toLowerCase();
-    if (s === "awaiting_chat") return "Next: message seller";
+    if (s === "pending" || s === "awaiting_chat") return "Next: message seller";
     if (s === "completed") return "Completed";
     if (s === "cancelled") return "Cancelled";
     return status || "In progress";
@@ -277,7 +333,7 @@ function transactionStatusLabel(status) {
 function transactionStatusHeadline(status, kind) {
     const s = String(status || "").toLowerCase();
     const isPurchase = kind === "purchase";
-    if (s === "awaiting_chat") {
+    if (s === "awaiting_chat" || s === "pending") {
         return isPurchase
             ? "Message them: lock in pickup &amp; payment"
             : "Message them: schedule pickup (it’s free)";
@@ -868,6 +924,11 @@ function navigateListing(key) {
 }
 
 function navigateToCheckout(ctx) {
+    const lid = ctx?.listingId != null ? Number(ctx.listingId) : NaN;
+    const needsServerCheckout = Number.isFinite(lid) && lid > 0;
+    if (needsServerCheckout && !requireAuth({ type: "buy", listingKey: String(ctx?.key ?? "") })) {
+        return;
+    }
     state.checkoutSuccess = null;
     state.checkoutContext = ctx;
     state.view = "checkout";
@@ -1073,9 +1134,23 @@ function requireAuth(intent) {
     return false;
 }
 
-/** After login/register: land on home so the feed reloads for the new session. */
+/** After login/register: honor queued intent (transactions, post, buy flow) or home. */
 function applyPostAuthNavigation() {
+    const intent = state.afterLoginIntent;
     state.afterLoginIntent = null;
+    if (!intent) {
+        navigate("home");
+        return;
+    }
+    if (intent.type === "navigate" && intent.view) {
+        navigate(intent.view);
+        return;
+    }
+    if (intent.type === "buy" && intent.listingKey) {
+        state.listingKey = intent.listingKey;
+        navigate("listing");
+        return;
+    }
     navigate("home");
 }
 
@@ -1170,6 +1245,10 @@ function wireTradeActions(root) {
         btn.addEventListener("click", () => {
             const snap = state.lastListingCheckoutSnap;
             if (!snap || snap.isMine) return;
+            const lid = snap.listingId != null ? Number(snap.listingId) : NaN;
+            if (Number.isFinite(lid) && lid > 0) {
+                if (!requireAuth({ type: "buy", listingKey: String(snap.listingKey ?? "") })) return;
+            }
             navigateToCheckout({
                 key: snap.listingKey,
                 title: snap.title,
@@ -1929,7 +2008,7 @@ function wireAuthPage() {
             applyPostAuthNavigation();
         } catch (err) {
             console.error(err);
-            setAuthAlert("Network error — is the API running?");
+            setAuthAlert(formatAuthNetworkError());
         }
     });
 
@@ -1977,7 +2056,7 @@ function wireAuthPage() {
             applyPostAuthNavigation();
         } catch (err) {
             console.error(err);
-            setAuthAlert("Network error — is the API running?");
+            setAuthAlert(formatAuthNetworkError());
         }
     });
 }
@@ -3412,22 +3491,64 @@ function syncApiPill() {
 }
 
 function wireCheckoutPage(root) {
-    root.querySelector("#checkout-confirm-btn")?.addEventListener("click", () => {
+    root.querySelector("#checkout-confirm-btn")?.addEventListener("click", async () => {
         const ctx = state.checkoutContext;
         if (!ctx) return;
+        if (!state.token) {
+            requireAuth({ type: "buy", listingKey: String(ctx.key ?? "") });
+            return;
+        }
         const isSale = ctx.price > 0;
-        saveLocalTransaction({
-            id: crypto.randomUUID(),
-            createdAt: new Date().toISOString(),
-            title: ctx.title,
-            listingKey: ctx.key,
-            listingId: ctx.listingId,
-            kind: isSale ? "purchase" : "claim",
-            listPrice: ctx.price,
-            platformFee: isSale ? platformFeeFromSale(ctx.price) : 0,
-            sellerNet: isSale ? sellerNetFromSale(ctx.price) : 0,
-            status: "awaiting_chat",
-        });
+        const listingIdNum = ctx.listingId != null ? Number(ctx.listingId) : NaN;
+        const useApi = Number.isFinite(listingIdNum) && listingIdNum > 0;
+
+        const btn = root.querySelector("#checkout-confirm-btn");
+        const label = isSale ? "Confirm purchase" : "Claim item";
+        if (useApi) {
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = "Confirming…";
+            }
+            const { res, data } = await apiJson("/api/transactions", {
+                method: "POST",
+                body: JSON.stringify({ listingId: listingIdNum, paymentMethod: "cash" }),
+            });
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = label;
+            }
+            if (!res.ok) {
+                if (res.status === 401) {
+                    setStoredToken(null);
+                    state.token = null;
+                    alert("Session expired — sign in again to complete checkout.");
+                    navigateAuth("login");
+                    return;
+                }
+                const msg = parseApiError(
+                    data,
+                    res.status === 409
+                        ? "That listing is no longer available."
+                        : "Could not complete checkout.",
+                );
+                alert(msg);
+                return;
+            }
+        } else {
+            saveLocalTransaction({
+                id: crypto.randomUUID(),
+                createdAt: new Date().toISOString(),
+                title: ctx.title,
+                listingKey: ctx.key,
+                listingId: ctx.listingId,
+                kind: isSale ? "purchase" : "claim",
+                listPrice: ctx.price,
+                platformFee: isSale ? platformFeeFromSale(ctx.price) : 0,
+                sellerNet: isSale ? sellerNetFromSale(ctx.price) : 0,
+                status: "awaiting_chat",
+            });
+        }
+
         state.checkoutSuccess = { title: ctx.title, isSale };
         state.checkoutContext = null;
         state.view = "checkout-success";
@@ -3446,6 +3567,8 @@ function renderCheckout() {
     }
 
     const isSale = ctx.price > 0;
+    const listingIdNum = ctx.listingId != null ? Number(ctx.listingId) : NaN;
+    const persistServer = Number.isFinite(listingIdNum) && listingIdNum > 0;
     const thumb =
         ctx.imageUrl && String(ctx.imageUrl).trim()
             ? `<div class="cdm-checkout-thumb-wrap"><img alt="" src="${escapeHtml(String(ctx.imageUrl).trim())}" /></div>`
@@ -3571,7 +3694,11 @@ function renderCheckout() {
         <div class="cdm-checkout-panel">
             <h3>What happens next</h3>
             <ol class="cdm-checkout-steps">
-                <li><strong>Confirm:</strong> we add this to your Transactions list (preview: saved in this browser).</li>
+                <li><strong>Confirm:</strong> ${
+                    persistServer
+                        ? "we save this to your account and the listing is marked sold in the database."
+                        : "we add this to your Transactions list (demo: this browser only)."
+                }</li>
                 <li><strong>Chat:</strong> message the seller to lock in pickup; be specific about day/time.</li>
                 <li><strong>Handoff:</strong> meet up, inspect the item, done. Formal “received” / dispute flow is TBD.</li>
             </ol>
@@ -3654,7 +3781,11 @@ function renderCheckout() {
                                 </button>
                                 <button type="button" class="cdm-checkout-cta-secondary" data-action="back-checkout">Cancel</button>
                                 <p class="cdm-checkout-footnote mb-0">
-                                    Preview: saved in this browser only. Production will use your <code>transactions</code> API and real payment rules.
+                                    ${
+                                        persistServer
+                                            ? "Confirm writes to the database via <code>POST /api/transactions</code> (Heroku MySQL when deployed)."
+                                            : "Demo: saved in this browser only. Open a <strong>live feed listing</strong> for server-backed checkout."
+                                    }
                                 </p>
                             </div>
                         </div>
@@ -3744,9 +3875,37 @@ function renderCheckoutSuccess() {
 
 function renderTransactions() {
     const root = document.getElementById("app");
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading transactions…</div></div>`;
+    void (async () => {
+        let serverRows = [];
+        let apiOk = false;
+        if (state.token) {
+            const { res, data } = await apiJson("/api/transactions/mine?limit=48");
+            apiOk = res.ok;
+            if (res.status === 401) {
+                setStoredToken(null);
+                state.token = null;
+                apiOk = false;
+            } else if (res.ok && Array.isArray(data)) {
+                serverRows = data.map(mapServerTransactionToRow);
+            }
+        }
+        const localDemo = loadLocalTransactions().filter((t) => t.listingId == null);
+        const rows = [...serverRows, ...localDemo].sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        );
+        renderTransactionsMounted(rows, {
+            apiOk,
+            hasLocalDemo: localDemo.length > 0,
+            serverCount: serverRows.length,
+        });
+    })();
+}
+
+function renderTransactionsMounted(rows, opts) {
+    const root = document.getElementById("app");
     root.innerHTML = "";
 
-    const rows = loadLocalTransactions();
     if (rows.length === 0) {
         state.txFilter = "all";
     }
@@ -3820,14 +3979,22 @@ function renderTransactions() {
         </div>
     `;
 
+    let emptyLead =
+        "Your <strong>buys</strong> and <strong>free claims</strong> show up here after checkout — same flow for sold or donated items.";
+    if (rows.length === 0 && state.token && opts.apiOk) {
+        emptyLead =
+            "No transactions on your account yet. Check out a <strong>live feed</strong> listing (not the sample cards) to save to the database.";
+    } else if (rows.length === 0 && state.token && !opts.apiOk) {
+        emptyLead = "Couldn’t load transactions from the API. Check that the backend is running and your session is valid.";
+    } else if (rows.length === 0 && !state.token) {
+        emptyLead =
+            "<strong>Sign in</strong> to load purchases from the server. Sample / demo checkouts stay in this browser only.";
+    }
     const emptyHtml = `
         <div class="cdm-tx-empty text-center py-5 px-3">
             <div class="cdm-tx-empty-icon mb-3" aria-hidden="true">✨</div>
             <h2 class="cdm-checkout-hero-title h4 mb-2">No dorm moves yet</h2>
-            <p class="cdm-muted mx-auto mb-4" style="max-width: 26rem">
-                Your <strong>buys</strong> and <strong>free claims</strong> show up here after checkout, same vibe whether someone sold or donated.
-                Right now it’s <strong>this browser only</strong> until your API backs it.
-            </p>
+            <p class="cdm-muted mx-auto mb-4" style="max-width: 26rem">${emptyLead}</p>
             <button type="button" class="btn cdm-btn-crimson rounded-pill px-4 me-2 mb-2" data-action="go-home">Find stuff</button>
             <button type="button" class="btn btn-outline-dark rounded-pill px-4 mb-2" data-action="post-item">Post an item</button>
         </div>
@@ -3908,9 +4075,9 @@ function renderTransactions() {
     }
 
     const footerTools =
-        rows.length > 0
+        opts.hasLocalDemo
             ? `<p class="text-center mt-4 mb-0">
-                <button type="button" class="btn btn-link btn-sm text-muted text-decoration-none" data-action="clear-local-transactions">Clear local history (demo)</button>
+                <button type="button" class="btn btn-link btn-sm text-muted text-decoration-none" data-action="clear-local-transactions">Clear demo history (this browser only)</button>
             </p>`
             : "";
 
@@ -3955,7 +4122,15 @@ function renderTransactions() {
                             </p>
                         </div>
                     </div>
-                    <p class="cdm-tx-demo-note small mb-3">Demo: stored in this browser · plug in <code>GET /api/transactions</code> when ready</p>
+                    <p class="cdm-tx-demo-note small mb-3">
+                        ${
+                            opts.serverCount > 0
+                                ? `<strong>${opts.serverCount}</strong> from your account (<code>GET /api/transactions/mine</code>)${opts.hasLocalDemo ? " · plus demo rows in this browser" : ""}.`
+                                : state.token
+                                  ? "Server-backed rows appear after you check out a <strong>live listing</strong>. Demo sample cards stay in this browser."
+                                  : "Sign in to sync with the database. Demo checkouts (sample feed) stay in this browser."
+                        }
+                    </p>
                     ${quickNav}
                     ${needsActionBanner}
                     ${statsHtml}
