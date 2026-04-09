@@ -44,8 +44,8 @@ public static class EnvLoader
                 continue;
             }
 
-            // Don't override real environment variables.
-            if (Environment.GetEnvironmentVariable(key) is null)
+            // Don't override non-empty values from the real environment. Empty string counts as unset so .env can fill it.
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(key)))
             {
                 Environment.SetEnvironmentVariable(key, value);
             }

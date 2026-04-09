@@ -936,6 +936,30 @@ function wirePostForm(root) {
         }
     }
 
+    function setAiStatus(msg) {
+        const el = root.querySelector("#post-ai-status");
+        if (el) el.textContent = msg || "";
+    }
+
+    function applyAiSuggestion(s) {
+        if (!s || typeof s !== "object") return;
+        if (s.title) setValue("title", s.title);
+        if (s.category) setValue("category", s.category);
+        if (s.condition) setValue("condition", s.condition);
+        if (s.dimensions) setValue("dimensions", s.dimensions);
+        if (s.description) setValue("description", s.description);
+        if (s.listingType) setRadio("listingType", s.listingType);
+        if (s.gapSolution) setRadio("gapSolution", s.gapSolution);
+        if (s.listingType === "sell" && s.price != null && String(s.price).trim() !== "") {
+            setValue("price", String(s.price));
+        }
+        if (s.listingType === "donate") {
+            setValue("price", "");
+        }
+        syncListingType();
+        syncGap();
+    }
+
     if (titleText) titleText.textContent = isEditing ? "Edit listing" : "Post an item";
     if (subtitleText) {
         subtitleText.innerHTML = isEditing
@@ -998,6 +1022,46 @@ function wirePostForm(root) {
             navigate("my-listings");
         });
     });
+
+    const aiAnalyzeBtn = root.querySelector("#post-ai-analyze-btn");
+    if (aiAnalyzeBtn) {
+        aiAnalyzeBtn.addEventListener("click", async () => {
+            const aiPhotoInput = form.querySelector("#post-ai-photo");
+            const f = aiPhotoInput?.files?.[0] ?? null;
+            if (!f) {
+                alert("AI mode: pick a photo first.");
+                return;
+            }
+            setAiStatus("Analyzing…");
+            aiAnalyzeBtn.disabled = true;
+            try {
+                const body = new FormData();
+                body.append("image", f, f.name || "image.jpg");
+                const res = await fetch(`${API_BASE}/api/ai/listing-from-image`, {
+                    method: "POST",
+                    body,
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    const msg =
+                        typeof data === "string"
+                            ? data
+                            : data?.detail || data?.title || `AI analyze failed (HTTP ${res.status}).`;
+                    setAiStatus("");
+                    alert(msg);
+                    return;
+                }
+                applyAiSuggestion(data);
+                setAiStatus("Suggestions applied. Review and edit before publishing.");
+            } catch (e) {
+                console.error(e);
+                setAiStatus("");
+                alert("AI analyze failed — is the API running?");
+            } finally {
+                aiAnalyzeBtn.disabled = false;
+            }
+        });
+    }
 
     form.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -2302,6 +2366,10 @@ async function renderPost() {
                                         </p>
                                         <label class="form-label small" for="post-ai-photo">Photo</label>
                                         <input class="form-control form-control-sm mb-2" type="file" id="post-ai-photo" name="aiPhoto" accept="image/*" capture="environment" />
+                                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                                            <button type="button" class="btn btn-sm btn-outline-dark" id="post-ai-analyze-btn">Analyze photo</button>
+                                            <span class="small cdm-muted" id="post-ai-status"></span>
+                                        </div>
                                         <div class="form-check">
                                             <input class="form-check-input" type="checkbox" id="post-ai-pile" name="aiPileMode" />
                                             <label class="form-check-label small" for="post-ai-pile">Pile mode — one photo, multiple items (AI splits into separate listings later)</label>
