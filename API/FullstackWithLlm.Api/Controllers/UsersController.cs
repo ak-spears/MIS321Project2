@@ -80,6 +80,24 @@ public sealed class UsersController : ControllerBase
             return BadRequest("Avatar value is too large.");
         }
 
+        if (!string.IsNullOrWhiteSpace(request.DefaultGapSolution))
+        {
+            var g = request.DefaultGapSolution.Trim().ToLowerInvariant();
+            if (g is not ("storage" or "pickup_window" or "ship_or_deliver"))
+            {
+                return BadRequest("defaultGapSolution must be storage, pickup_window, or ship_or_deliver.");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.PreferredReceiveGap))
+        {
+            var g = request.PreferredReceiveGap.Trim().ToLowerInvariant();
+            if (g is not ("storage" or "pickup_window" or "ship_or_deliver"))
+            {
+                return BadRequest("preferredReceiveGap must be storage, pickup_window, or ship_or_deliver.");
+            }
+        }
+
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!int.TryParse(idRaw, out var userId) || userId <= 0)
         {

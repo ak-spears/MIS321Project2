@@ -19,6 +19,24 @@ public sealed class UserRepository
         _connectionString = connectionString;
     }
 
+    private static MySqlException? AsMySqlException(Exception ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is MySqlException mx)
+            {
+                return mx;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsUnknownColumnDbError(MySqlException ex) =>
+        ex.ErrorCode == MySqlErrorCode.BadFieldError
+        || ex.Number == 1054
+        || ex.Message.Contains("Unknown column", StringComparison.OrdinalIgnoreCase);
+
     private static string DisplayNameFromEmail(string email)
     {
         var trimmed = email.Trim();
@@ -109,7 +127,25 @@ public sealed class UserRepository
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        const string sql = """
+        const string sqlFull = """
+            SELECT user_id, campus_id, email, display_name, phone, lives_on_campus,
+                   move_in_date, move_out_date, dorm_building, suite_letter, avatar_url,
+                   default_gap_solution, preferred_receive_gap
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        const string sqlDefaultGapOnly = """
+            SELECT user_id, campus_id, email, display_name, phone, lives_on_campus,
+                   move_in_date, move_out_date, dorm_building, suite_letter, avatar_url,
+                   default_gap_solution
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        const string sqlLegacy = """
             SELECT user_id, campus_id, email, display_name, phone, lives_on_campus,
                    move_in_date, move_out_date, dorm_building, suite_letter, avatar_url
             FROM users
@@ -117,6 +153,38 @@ public sealed class UserRepository
             LIMIT 1;
             """;
 
+        try
+        {
+            return await ReadUserProfileAsync(connection, sqlFull, userId, ProfileGapReadMode.Full, cancellationToken);
+        }
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnDbError(mx))
+        {
+            try
+            {
+                return await ReadUserProfileAsync(
+                    connection, sqlDefaultGapOnly, userId, ProfileGapReadMode.DefaultGapOnly, cancellationToken);
+            }
+            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnDbError(mx2))
+            {
+                return await ReadUserProfileAsync(connection, sqlLegacy, userId, ProfileGapReadMode.Legacy, cancellationToken);
+            }
+        }
+    }
+
+    private enum ProfileGapReadMode
+    {
+        Full,
+        DefaultGapOnly,
+        Legacy,
+    }
+
+    private static async Task<UserProfileDto?> ReadUserProfileAsync(
+        MySqlConnection connection,
+        string sql,
+        int userId,
+        ProfileGapReadMode mode,
+        CancellationToken cancellationToken)
+    {
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@UserId", userId);
 
@@ -133,6 +201,18 @@ public sealed class UserRepository
             suite = string.IsNullOrWhiteSpace(s) ? null : s.Trim().ToUpperInvariant()[0].ToString();
         }
 
+        string? defaultGap = null;
+        string? preferredReceive = null;
+        if (mode == ProfileGapReadMode.Full)
+        {
+            defaultGap = reader.IsDBNull(11) ? null : reader.GetString(11);
+            preferredReceive = reader.IsDBNull(12) ? null : reader.GetString(12);
+        }
+        else if (mode == ProfileGapReadMode.DefaultGapOnly)
+        {
+            defaultGap = reader.IsDBNull(11) ? null : reader.GetString(11);
+        }
+
         return new UserProfileDto
         {
             UserId = reader.GetInt32(0),
@@ -146,6 +226,8 @@ public sealed class UserRepository
             DormBuilding = reader.IsDBNull(8) ? null : reader.GetString(8),
             SuiteLetter = suite,
             AvatarUrl = reader.IsDBNull(10) ? null : reader.GetString(10),
+            DefaultGapSolution = defaultGap,
+            PreferredReceiveGap = preferredReceive,
         };
     }
 
@@ -154,7 +236,36 @@ public sealed class UserRepository
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        const string sql = """
+        const string sqlFull = """
+            UPDATE users
+            SET display_name = @DisplayName,
+                phone = @Phone,
+                lives_on_campus = @LivesOnCampus,
+                move_in_date = @MoveInDate,
+                move_out_date = @MoveOutDate,
+                dorm_building = @DormBuilding,
+                suite_letter = @SuiteLetter,
+                avatar_url = @AvatarUrl,
+                default_gap_solution = @DefaultGapSolution,
+                preferred_receive_gap = @PreferredReceiveGap
+            WHERE user_id = @UserId;
+            """;
+
+        const string sqlDefaultGapOnly = """
+            UPDATE users
+            SET display_name = @DisplayName,
+                phone = @Phone,
+                lives_on_campus = @LivesOnCampus,
+                move_in_date = @MoveInDate,
+                move_out_date = @MoveOutDate,
+                dorm_building = @DormBuilding,
+                suite_letter = @SuiteLetter,
+                avatar_url = @AvatarUrl,
+                default_gap_solution = @DefaultGapSolution
+            WHERE user_id = @UserId;
+            """;
+
+        const string sqlLegacy = """
             UPDATE users
             SET display_name = @DisplayName,
                 phone = @Phone,
@@ -167,6 +278,40 @@ public sealed class UserRepository
             WHERE user_id = @UserId;
             """;
 
+        try
+        {
+            return await ExecuteUserProfileUpdateAsync(connection, sqlFull, userId, request, ProfileGapWriteMode.Full, cancellationToken);
+        }
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnDbError(mx))
+        {
+            try
+            {
+                return await ExecuteUserProfileUpdateAsync(
+                    connection, sqlDefaultGapOnly, userId, request, ProfileGapWriteMode.DefaultGapOnly, cancellationToken);
+            }
+            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnDbError(mx2))
+            {
+                return await ExecuteUserProfileUpdateAsync(
+                    connection, sqlLegacy, userId, request, ProfileGapWriteMode.Legacy, cancellationToken);
+            }
+        }
+    }
+
+    private enum ProfileGapWriteMode
+    {
+        Full,
+        DefaultGapOnly,
+        Legacy,
+    }
+
+    private static async Task<bool> ExecuteUserProfileUpdateAsync(
+        MySqlConnection connection,
+        string sql,
+        int userId,
+        UpdateUserProfileRequest request,
+        ProfileGapWriteMode mode,
+        CancellationToken cancellationToken)
+    {
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@UserId", userId);
         cmd.Parameters.AddWithValue("@DisplayName", request.DisplayName.Trim());
@@ -181,6 +326,19 @@ public sealed class UserRepository
             {
                 Value = string.IsNullOrWhiteSpace(request.AvatarUrl) ? DBNull.Value : request.AvatarUrl.Trim(),
             });
+        if (mode != ProfileGapWriteMode.Legacy)
+        {
+            cmd.Parameters.AddWithValue(
+                "@DefaultGapSolution",
+                string.IsNullOrWhiteSpace(request.DefaultGapSolution) ? DBNull.Value : request.DefaultGapSolution.Trim());
+        }
+
+        if (mode == ProfileGapWriteMode.Full)
+        {
+            cmd.Parameters.AddWithValue(
+                "@PreferredReceiveGap",
+                string.IsNullOrWhiteSpace(request.PreferredReceiveGap) ? DBNull.Value : request.PreferredReceiveGap.Trim());
+        }
 
         var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
         return rows > 0;
@@ -195,7 +353,8 @@ public sealed class UserRepository
         DateTime moveDate,
         DateTime moveOutDate,
         string? dormBuilding,
-        char? suiteLetter)
+        char? suiteLetter,
+        string? defaultGapSolution)
     {
         var normalizedEmail = email.Trim().ToLowerInvariant();
         var displayName = DisplayNameFromEmail(normalizedEmail);
@@ -205,7 +364,18 @@ public sealed class UserRepository
 
         var campusId = await GetDefaultCampusIdAsync(connection);
 
-        const string insertSql = """
+        const string insertSqlWithGap = """
+            INSERT INTO users (
+                campus_id, email, password_hash, display_name, phone, lives_on_campus,
+                move_in_date, move_out_date, dorm_building, suite_letter, default_gap_solution
+            )
+            VALUES (
+                @CampusId, @Email, @PasswordHash, @DisplayName, @Phone, @LivesOnCampus,
+                @MoveInDate, @MoveOutDate, @DormBuilding, @SuiteLetter, @DefaultGapSolution
+            );
+            """;
+
+        const string insertSqlLegacy = """
             INSERT INTO users (
                 campus_id, email, password_hash, display_name, phone, lives_on_campus,
                 move_in_date, move_out_date, dorm_building, suite_letter
@@ -216,8 +386,9 @@ public sealed class UserRepository
             );
             """;
 
-        await using (var command = new MySqlCommand(insertSql, connection))
+        async Task<bool> TryInsertAsync(string sql, bool includeDefaultGap)
         {
+            await using var command = new MySqlCommand(sql, connection);
             command.Parameters.AddWithValue("@CampusId", campusId);
             command.Parameters.AddWithValue("@Email", normalizedEmail);
             command.Parameters.AddWithValue("@PasswordHash", passwordHash);
@@ -236,11 +407,34 @@ public sealed class UserRepository
                 command.Parameters.AddWithValue("@SuiteLetter", suiteLetter.Value.ToString());
             }
 
+            if (includeDefaultGap)
+            {
+                command.Parameters.AddWithValue(
+                    "@DefaultGapSolution",
+                    string.IsNullOrWhiteSpace(defaultGapSolution) ? DBNull.Value : defaultGapSolution.Trim());
+            }
+
             try
             {
                 await command.ExecuteNonQueryAsync();
+                return true;
             }
             catch (MySqlException ex) when (ex.ErrorCode == MySqlErrorCode.DuplicateKeyEntry)
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            if (!await TryInsertAsync(insertSqlWithGap, includeDefaultGap: true))
+            {
+                return null;
+            }
+        }
+        catch (MySqlException ex) when (IsUnknownColumnDbError(ex))
+        {
+            if (!await TryInsertAsync(insertSqlLegacy, includeDefaultGap: false))
             {
                 return null;
             }

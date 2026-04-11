@@ -13,6 +13,10 @@ public sealed class UserProfileDto
     public string? DormBuilding { get; init; }
     public string? SuiteLetter { get; init; }
     public string? AvatarUrl { get; init; }
+    /// <summary>storage | pickup_window | ship_or_deliver — default when creating listings.</summary>
+    public string? DefaultGapSolution { get; init; }
+    /// <summary>storage | pickup_window | ship_or_deliver — preferred way to receive items when buying.</summary>
+    public string? PreferredReceiveGap { get; init; }
 }
 
 public sealed class UpdateUserProfileRequest
@@ -28,5 +32,9 @@ public sealed class UpdateUserProfileRequest
     /// <summary>Single letter A, B, C, or D (optional).</summary>
     public string? SuiteLetter { get; set; }
     public string? AvatarUrl { get; set; }
+    /// <summary>storage | pickup_window | ship_or_deliver, or null to clear.</summary>
+    public string? DefaultGapSolution { get; set; }
+    /// <summary>storage | pickup_window | ship_or_deliver, or null to clear — when buying.</summary>
+    public string? PreferredReceiveGap { get; set; }
 }
 

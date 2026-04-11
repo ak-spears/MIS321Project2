@@ -18,6 +18,8 @@ public sealed class RegisterRequest
     /// When null, defaults to true (legacy clients).
     /// </summary>
     public bool? RequiresSuiteLetter { get; set; }
+    /// <summary>Optional: storage | pickup_window | ship_or_deliver.</summary>
+    public string? DefaultGapSolution { get; set; }
 }
 
 public sealed class LoginRequest

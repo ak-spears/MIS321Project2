@@ -117,6 +117,20 @@ public sealed class ListingsController : ControllerBase
             return BadRequest("Price cannot be negative.");
         }
 
+        if (!string.IsNullOrWhiteSpace(request.Condition))
+        {
+            var c = request.Condition.Trim().ToLowerInvariant();
+            if (c is not ("new" or "like_new" or "good" or "fair"))
+            {
+                return BadRequest("condition must be new, like_new, good, or fair.");
+            }
+        }
+
+        if (request.Dimensions is { Length: > 120 })
+        {
+            return BadRequest("dimensions must be at most 120 characters.");
+        }
+
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!int.TryParse(idRaw, out var userId) || userId <= 0)
         {
@@ -168,6 +182,20 @@ public sealed class ListingsController : ControllerBase
         if (request.Price < 0)
         {
             return BadRequest("Price cannot be negative.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Condition))
+        {
+            var c = request.Condition.Trim().ToLowerInvariant();
+            if (c is not ("new" or "like_new" or "good" or "fair"))
+            {
+                return BadRequest("condition must be new, like_new, good, or fair.");
+            }
+        }
+
+        if (request.Dimensions is { Length: > 120 })
+        {
+            return BadRequest("dimensions must be at most 120 characters.");
         }
 
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);

@@ -25,7 +25,7 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'auth' | 'post' | 'my-listings' | 'listing' | 'profile'} */
+    /** @type {'home' | 'auth' | 'post' | 'my-listings' | 'listing' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
     view: "home",
     /** Which panel to show on the auth page. */
     authPageMode: /** @type {'login' | 'signup'} */ ("login"),
@@ -44,15 +44,26 @@ const state = {
     feedItemsCache: /** @type {null | HomeFeedItem[]} */ (null),
     /** Multi-select filters; empty Set = no constraint on that dimension. */
     feedFilters: {
-        /** @type {Set<number>} */
-        campusIds: new Set(),
         /** @type {Set<'sell' | 'donate'>} */
         listingKinds: new Set(),
-        /** @type {Set<string>} */
+        /** @type {Set<string>} gap_solution keys + __none__ */
         gapKeys: new Set(),
-        /** @type {Set<'cash' | 'card'>} */
-        payments: new Set(),
+        /** @type {Set<string>} Chip ids + sidebar categories (mini_fridge + microwave → appliance). */
+        categoryChips: new Set(),
+        /** @type {Set<string>} small_dorm | any_space | __none__ */
+        spaceKeys: new Set(),
     },
+    /** Home hero search: filters feed by title + blurb (substring, case-insensitive). */
+    feedSearchQuery: "",
+    /** AI pile mode: same photo, multiple listings (remaining drafts after current form). */
+    pileListingTotal: /** @type {null | number} */ (null),
+    /** @type {null | Record<string, unknown>[]} */
+    pileListingQueue: null,
+    pileListingIndex: 0,
+    /** From GET /api/users/me — overrides AI gap suggestion when set. */
+    preferredGapSolution: /** @type {null | string} */ (null),
+    /** Normalized 0–1 crop for the current AI draft listing image (from model). */
+    currentAiCropBox: /** @type {null | { left: number, top: number, width: number, height: number }} */ (null),
 };
 
 /**
@@ -64,8 +75,10 @@ const state = {
  *   photoDataUrl: string | null,
  *   campusId: number | null,
  *   gapSolution: string | null,
+ *   condition: string | null,
+ *   categorySlug: string | null,
  *   listingKind: 'sell' | 'donate',
- *   payment: 'cash' | 'card' | null,
+ *   spaceSuitability: string | null,
  * }} HomeFeedItem
  */
 
@@ -225,6 +238,9 @@ function readFileAsDataUrl(file) {
 const categoryLabel = {
     bedding: "Bedding (twin XL)",
     appliance: "Appliances",
+    cookware: "Cookware & cooking supplies",
+    decor: "Decor",
+    electronics: "Electronics",
     furniture: "Furniture / desk",
     storage: "Storage / organizers",
     lighting: "Lighting",
@@ -246,6 +262,36 @@ const gapLabel = {
     donate_unclaimed: "Seller ships or delivers to buyer",
 };
 
+const spaceSuitabilityLabel = {
+    small_dorm: "Small dorm room",
+    any_space: "Any space",
+};
+
+/** Normalize API listing category for filtering (matches post form `name="category"` values). */
+function normalizeListingCategorySlug(raw) {
+    if (raw == null || String(raw).trim() === "") return null;
+    return String(raw).trim().toLowerCase();
+}
+
+/** Category filter (sidebar + hero chips). Mini-fridge + microwave chips match <code>appliance</code>. */
+function listingMatchesCategoryChips(/** @type {string | null} */ slug, /** @type {Set<string>} */ chips) {
+    if (chips.size === 0) return true;
+    for (const c of chips) {
+        if (c === "bedding" && slug === "bedding") return true;
+        if (c === "appliance" && slug === "appliance") return true;
+        if (c === "furniture" && slug === "furniture") return true;
+        if (c === "lighting" && slug === "lighting") return true;
+        if (c === "textbooks" && slug === "textbooks") return true;
+        if (c === "storage" && slug === "storage") return true;
+        if (c === "cookware" && slug === "cookware") return true;
+        if (c === "decor" && slug === "decor") return true;
+        if (c === "electronics" && slug === "electronics") return true;
+        if (c === "other" && slug === "other") return true;
+        if ((c === "mini_fridge" || c === "microwave") && slug === "appliance") return true;
+    }
+    return false;
+}
+
 /** Demo feed cards for the home page (real API feed later). */
 const SAMPLE_HOME_FEED = [
     {
@@ -256,8 +302,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "Free",
         priceNum: 0,
         campusId: 1,
+        categorySlug: "bedding",
         gapSolution: "storage",
-        payment: "cash",
+        spaceSuitability: "any_space",
     },
     {
         id: "sample-2",
@@ -267,8 +314,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$60",
         priceNum: 60,
         campusId: 1,
+        categorySlug: "appliance",
         gapSolution: "pickup_window",
-        payment: "card",
+        spaceSuitability: "small_dorm",
     },
     {
         id: "sample-3",
@@ -278,8 +326,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$25",
         priceNum: 25,
         campusId: 1,
+        categorySlug: "appliance",
         gapSolution: "ship_or_deliver",
-        payment: "cash",
+        spaceSuitability: "small_dorm",
     },
     {
         id: "sample-4",
@@ -289,8 +338,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$15",
         priceNum: 15,
         campusId: 1,
+        categorySlug: "furniture",
         gapSolution: "storage",
-        payment: "card",
+        spaceSuitability: "any_space",
     },
     {
         id: "sample-5",
@@ -300,8 +350,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$8",
         priceNum: 8,
         campusId: 1,
+        categorySlug: "lighting",
         gapSolution: "pickup_window",
-        payment: "cash",
+        spaceSuitability: "any_space",
     },
     {
         id: "sample-6",
@@ -311,8 +362,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$22",
         priceNum: 22,
         campusId: 1,
+        categorySlug: "furniture",
         gapSolution: "donate_unclaimed",
-        payment: "card",
+        spaceSuitability: "small_dorm",
     },
     {
         id: "sample-7",
@@ -322,8 +374,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$40",
         priceNum: 40,
         campusId: 1,
+        categorySlug: "textbooks",
         gapSolution: "storage",
-        payment: "cash",
+        spaceSuitability: "any_space",
     },
     {
         id: "sample-8",
@@ -333,8 +386,9 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$12",
         priceNum: 12,
         campusId: 1,
+        categorySlug: "other",
         gapSolution: "ship_or_deliver",
-        payment: "card",
+        spaceSuitability: null,
     },
     {
         id: "sample-9",
@@ -344,13 +398,11 @@ const SAMPLE_HOME_FEED = [
         priceLabel: "$6",
         priceNum: 6,
         campusId: 1,
+        categorySlug: "storage",
         gapSolution: "pickup_window",
-        payment: "cash",
+        spaceSuitability: "any_space",
     },
 ];
-
-/** Sidebar filter: campus (matches API `campus_id`). */
-const FEED_FILTER_CAMPUSES = [{ id: 1, label: "University of Alabama" }];
 
 /** 1×1 transparent GIF — feed cards set real src via JS to avoid browser limits on huge attributes in innerHTML. */
 const FEED_THUMB_PLACEHOLDER_SRC =
@@ -382,6 +434,10 @@ function homeFeedCardHtml(item) {
     const thumbImg = item.photoDataUrl
         ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
         : "";
+    const condRaw = item.condition != null && String(item.condition).trim() !== "" ? item.condition : null;
+    const condLine = condRaw
+        ? `<div class="small mt-1"><span class="text-muted">Condition</span> <span class="text-dark">${escapeHtml(formatListingCondition(condRaw))}</span></div>`
+        : "";
     return `
         <div class="col-12 col-md-6 col-xl-4">
             <div class="cdm-card cdm-listing-card">
@@ -389,6 +445,7 @@ function homeFeedCardHtml(item) {
                 <div class="p-3">
                     <div class="fw-semibold">${title}</div>
                     <div class="cdm-muted small">${blurb}</div>
+                    ${condLine}
                     <div class="mt-2 d-flex align-items-center justify-content-between">
                         <div class="fw-semibold">${price}</div>
                         <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>
@@ -401,13 +458,13 @@ function homeFeedCardHtml(item) {
 
 function applyFeedFilters(items) {
     const f = state.feedFilters;
+    const q = (state.feedSearchQuery || "").trim().toLowerCase();
     return items.filter((row) => {
-        if (f.campusIds.size > 0) {
-            const cid = row.campusId;
-            if (cid == null || !f.campusIds.has(Number(cid))) return false;
-        }
         if (f.listingKinds.size > 0) {
             if (!f.listingKinds.has(row.listingKind)) return false;
+        }
+        if (f.categoryChips.size > 0) {
+            if (!listingMatchesCategoryChips(row.categorySlug, f.categoryChips)) return false;
         }
         if (f.gapKeys.size > 0) {
             const g = row.gapSolution;
@@ -419,9 +476,20 @@ function applyFeedFilters(items) {
             }
             if (!ok) return false;
         }
-        if (f.payments.size > 0) {
-            const p = row.payment;
-            if (p != null && !f.payments.has(p)) return false;
+        if (f.spaceKeys.size > 0) {
+            const raw = row.spaceSuitability;
+            const s = raw != null && String(raw).trim() !== "" ? String(raw).trim() : null;
+            let ok = false;
+            for (const key of f.spaceKeys) {
+                if (key === "__none__") {
+                    if (s == null) ok = true;
+                } else if (s === key) ok = true;
+            }
+            if (!ok) return false;
+        }
+        if (q) {
+            const hay = `${row.title || ""} ${row.blurb || ""}`.toLowerCase();
+            if (!hay.includes(q)) return false;
         }
         return true;
     });
@@ -447,6 +515,7 @@ async function fetchFeedItemsForHome() {
                 .map((row) => {
                     const desc = (row.description || "").trim();
                     const cat = row.category || "listing";
+                    const categorySlug = normalizeListingCategorySlug(row.category);
                     const seller = row.sellerDisplayName || "Seller";
                     const blurb = desc
                         ? `${desc.slice(0, 72)}${desc.length > 72 ? "…" : ""} · ${cat} · ${seller}`
@@ -462,6 +531,10 @@ async function fetchFeedItemsForHome() {
                     const campusRaw = row.campusId ?? row.CampusId;
                     const campusId = campusRaw != null ? Number(campusRaw) : null;
                     const gapSolution = row.gapSolution ?? row.GapSolution ?? null;
+                    const condition = row.condition ?? row.Condition ?? null;
+                    const spaceRaw = row.spaceSuitability ?? row.SpaceSuitability ?? null;
+                    const spaceSuitability =
+                        spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
                     return {
                         key,
                         title: row.title,
@@ -470,8 +543,10 @@ async function fetchFeedItemsForHome() {
                         photoDataUrl: img,
                         campusId,
                         gapSolution,
+                        condition: condition != null && String(condition).trim() !== "" ? String(condition).trim() : null,
+                        categorySlug,
                         listingKind: priceNum === 0 ? "donate" : "sell",
-                        payment: /** @type {null} */ (null),
+                        spaceSuitability,
                     };
                 });
         }
@@ -490,8 +565,13 @@ async function fetchFeedItemsForHome() {
             photoDataUrl,
             campusId: x.campusId ?? 1,
             gapSolution: x.gapSolution ?? null,
+            condition: null,
+            categorySlug: x.categorySlug ? normalizeListingCategorySlug(x.categorySlug) : null,
             listingKind: priceNum === 0 ? "donate" : "sell",
-            payment: x.payment === "card" ? "card" : "cash",
+            spaceSuitability:
+                x.spaceSuitability != null && String(x.spaceSuitability).trim() !== ""
+                    ? String(x.spaceSuitability).trim()
+                    : null,
         };
     });
     if (!state.token) {
@@ -538,14 +618,6 @@ function syncFeedFilterSummaries() {
         const el = document.getElementById(id);
         if (el) el.textContent = text;
     };
-    setText(
-        "cdm-filter-school-summary",
-        f.campusIds.size === 0
-            ? "Any"
-            : f.campusIds.size === 1
-              ? FEED_FILTER_CAMPUSES.find((c) => c.id === [...f.campusIds][0])?.label ?? `${f.campusIds.size} selected`
-              : `${f.campusIds.size} selected`,
-    );
     const kindLab = { sell: "Sell", donate: "Donate" };
     setText(
         "cdm-filter-type-summary",
@@ -558,18 +630,98 @@ function syncFeedFilterSummaries() {
                     .join(", "),
     );
     setText(
-        "cdm-filter-gap-summary",
-        f.gapKeys.size === 0 ? "Any" : f.gapKeys.size === 1 ? gapFilterShortLabel([...f.gapKeys][0]) : `${f.gapKeys.size} selected`,
+        "cdm-filter-category-summary",
+        f.categoryChips.size === 0 ? "Any" : f.categoryChips.size === 1 ? categoryFilterSummaryLabel([...f.categoryChips][0]) : `${f.categoryChips.size} selected`,
     );
     setText(
-        "cdm-filter-pay-summary",
-        f.payments.size === 0 ? "Any" : f.payments.size === 2 ? "Cash & card" : [...f.payments].join(", "),
+        "cdm-filter-gap-summary",
+        f.gapKeys.size === 0
+            ? "Any"
+            : f.gapKeys.size === 1
+              ? gapFilterShortLabel([...f.gapKeys][0])
+              : `${f.gapKeys.size} selected`,
     );
+    setText(
+        "cdm-filter-space-summary",
+        f.spaceKeys.size === 0
+            ? "Any"
+            : f.spaceKeys.size === 1
+              ? spaceFilterShortLabel([...f.spaceKeys][0])
+              : `${f.spaceKeys.size} selected`,
+    );
+}
+
+function categoryFilterSummaryLabel(key) {
+    if (key === "mini_fridge") return "Mini-fridge";
+    if (key === "microwave") return "Microwave";
+    return categoryLabel[key] || key.replace(/_/g, " ");
+}
+
+function spaceFilterShortLabel(key) {
+    if (key === "__none__") return "Not specified";
+    return spaceSuitabilityLabel[key] || key;
 }
 
 function gapFilterShortLabel(key) {
     if (key === "__none__") return "Not specified";
     return gapLabel[key] || key;
+}
+
+function syncCategoryChipElements(container) {
+    if (!container?.querySelectorAll) return;
+    container.querySelectorAll("[data-feed-chip]").forEach((btn) => {
+        const id = btn.getAttribute("data-feed-chip");
+        if (!id) return;
+        const on = state.feedFilters.categoryChips.has(id);
+        btn.classList.toggle("cdm-chip--selected", on);
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+}
+
+/** Keep sidebar category checkboxes aligned with <code>categoryChips</code> (hero chips + sidebar). */
+function syncCategoryFilterCheckboxes(panel) {
+    if (!panel?.querySelectorAll) return;
+    panel.querySelectorAll("[data-filter-cat]").forEach((cb) => {
+        if (!(cb instanceof HTMLInputElement)) return;
+        const v = cb.getAttribute("data-filter-cat");
+        if (!v) return;
+        const f = state.feedFilters.categoryChips;
+        if (v === "appliance") {
+            cb.checked = f.has("appliance") || f.has("mini_fridge") || f.has("microwave");
+        } else {
+            cb.checked = f.has(v);
+        }
+    });
+}
+
+function wireHomeQuickCategoryChips(root) {
+    const wrap = root.querySelector("#cdm-feed-category-chips");
+    if (!wrap) return;
+    syncCategoryChipElements(wrap);
+    wrap.querySelectorAll("[data-feed-chip]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const id = btn.getAttribute("data-feed-chip");
+            if (!id) return;
+            if (state.feedFilters.categoryChips.has(id)) {
+                state.feedFilters.categoryChips.delete(id);
+            } else {
+                state.feedFilters.categoryChips.add(id);
+            }
+            syncCategoryChipElements(wrap);
+            syncCategoryFilterCheckboxes(document.getElementById("cdm-feed-filters"));
+            refreshHomeFeedGrid();
+        });
+    });
+}
+
+function wireHomeFeedSearch(root) {
+    const searchEl = root.querySelector("#search");
+    if (!searchEl || !(searchEl instanceof HTMLInputElement)) return;
+    searchEl.value = state.feedSearchQuery;
+    searchEl.addEventListener("input", () => {
+        state.feedSearchQuery = searchEl.value;
+        refreshHomeFeedGrid();
+    });
 }
 
 function wireHomeFeedFilters(root) {
@@ -578,27 +730,32 @@ function wireHomeFeedFilters(root) {
 
     function readFiltersFromDom() {
         const f = state.feedFilters;
-        f.campusIds.clear();
         f.listingKinds.clear();
         f.gapKeys.clear();
-        f.payments.clear();
-        panel.querySelectorAll('input[type="checkbox"][data-filter-campus]:checked').forEach((el) => {
-            const v = Number(el.getAttribute("data-filter-campus"));
-            if (Number.isFinite(v)) f.campusIds.add(v);
-        });
+        f.spaceKeys.clear();
+        /** Keep hero-only chip keys (not represented as sidebar checkboxes). */
+        const heroOnlyCat = new Set(["mini_fridge", "microwave"]);
+        const keptCats = new Set([...f.categoryChips].filter((k) => heroOnlyCat.has(k)));
+        f.categoryChips.clear();
+        keptCats.forEach((k) => f.categoryChips.add(k));
         panel.querySelectorAll('input[type="checkbox"][data-filter-kind]:checked').forEach((el) => {
             const v = el.getAttribute("data-filter-kind");
             if (v === "sell" || v === "donate") f.listingKinds.add(v);
+        });
+        panel.querySelectorAll('input[type="checkbox"][data-filter-cat]:checked').forEach((el) => {
+            const v = el.getAttribute("data-filter-cat");
+            if (v) f.categoryChips.add(v);
         });
         panel.querySelectorAll('input[type="checkbox"][data-filter-gap]:checked').forEach((el) => {
             const v = el.getAttribute("data-filter-gap");
             if (v) f.gapKeys.add(v);
         });
-        panel.querySelectorAll('input[type="checkbox"][data-filter-pay]:checked').forEach((el) => {
-            const v = el.getAttribute("data-filter-pay");
-            if (v === "cash" || v === "card") f.payments.add(v);
+        panel.querySelectorAll('input[type="checkbox"][data-filter-space]:checked').forEach((el) => {
+            const v = el.getAttribute("data-filter-space");
+            if (v) f.spaceKeys.add(v);
         });
         syncFeedFilterSummaries();
+        syncCategoryChipElements(document.getElementById("cdm-feed-category-chips"));
         refreshHomeFeedGrid();
     }
 
@@ -608,13 +765,19 @@ function wireHomeFeedFilters(root) {
 
     document.getElementById("cdm-filter-clear")?.addEventListener("click", (e) => {
         e.preventDefault();
+        state.feedFilters.categoryChips.clear();
         panel.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
             cb.checked = false;
         });
+        state.feedSearchQuery = "";
+        const searchEl = document.getElementById("search");
+        if (searchEl && searchEl instanceof HTMLInputElement) searchEl.value = "";
         readFiltersFromDom();
     });
 
     syncFeedFilterSummaries();
+    syncCategoryChipElements(document.getElementById("cdm-feed-category-chips"));
+    syncCategoryFilterCheckboxes(panel);
 }
 
 function hydrateFeedListingImages(root) {
@@ -636,6 +799,12 @@ function hydrateMineListingThumbs(root) {
 }
 
 function navigate(view) {
+    if (state.view === "post" && view !== "post") {
+        state.pileListingQueue = null;
+        state.pileListingTotal = null;
+        state.pileListingIndex = 0;
+        state.currentAiCropBox = null;
+    }
     if (view === "auth") {
         state.view = "auth";
         render();
@@ -733,6 +902,84 @@ function resolveAvatarSrc(raw) {
         return DEFAULT_PROFILE_IMAGE_SRC;
     }
     return s;
+}
+
+/** True if the normalized box covers ~the entire image (no meaningful crop). */
+function isNearFullFrameAiCrop(box) {
+    if (!box || typeof box !== "object") return true;
+    const { left, top, width, height } = box;
+    if (![left, top, width, height].every((n) => typeof n === "number" && Number.isFinite(n))) return true;
+    const tol = 0.04;
+    return left <= tol && top <= tol && width >= 1 - 2 * tol && height >= 1 - 2 * tol;
+}
+
+/** Skip JPEG re-encode when the model says “full frame” (no meaningful crop). */
+function shouldApplyAiCrop(box) {
+    if (!box || typeof box !== "object") return false;
+    const { left, top, width, height } = box;
+    if (![left, top, width, height].every((n) => typeof n === "number" && Number.isFinite(n))) return false;
+    return !isNearFullFrameAiCrop(box);
+}
+
+/**
+ * When pile mode has multiple drafts but the vision model returns full-frame crops, split the photo into a grid
+ * so each listing still gets a different zoom region (deterministic fallback — not true object detection).
+ * @param {number} index1Based 1 .. total
+ */
+function pileGridCropBox(index1Based, total) {
+    if (total < 2 || index1Based < 1 || index1Based > total) return null;
+    const cols = Math.ceil(Math.sqrt(total));
+    const rows = Math.ceil(total / cols);
+    const wi = 1 / cols;
+    const hi = 1 / rows;
+    const margin = 0.015;
+    const col = (index1Based - 1) % cols;
+    const row = Math.floor((index1Based - 1) / cols);
+    const left = col * wi + margin;
+    const top = row * hi + margin;
+    const width = wi - 2 * margin;
+    const height = hi - 2 * margin;
+    if (width < 0.05 || height < 0.05) return null;
+    return { left, top, width, height };
+}
+
+/**
+ * Crops a data-URL image using normalized box (0–1), then downscales like listing upload.
+ * @param {string} dataUrl
+ * @param {{ left: number, top: number, width: number, height: number }} box
+ */
+async function cropDataUrlToNormalizedJpeg(dataUrl, box, maxEdge = 1600, quality = 0.86) {
+    const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = reject;
+        i.src = dataUrl;
+    });
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    const sx = Math.max(0, Math.floor(box.left * iw));
+    const sy = Math.max(0, Math.floor(box.top * ih));
+    let sw = Math.min(iw - sx, Math.max(1, Math.round(box.width * iw)));
+    let sh = Math.min(ih - sy, Math.max(1, Math.round(box.height * ih)));
+    const canvas = document.createElement("canvas");
+    canvas.width = sw;
+    canvas.height = sh;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas unsupported");
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+    if (scale < 1) {
+        const w = Math.max(1, Math.round(sw * scale));
+        const h = Math.max(1, Math.round(sh * scale));
+        const c2 = document.createElement("canvas");
+        c2.width = w;
+        c2.height = h;
+        const ctx2 = c2.getContext("2d");
+        if (!ctx2) return canvas.toDataURL("image/jpeg", quality);
+        ctx2.drawImage(canvas, 0, 0, sw, sh, 0, 0, w, h);
+        return c2.toDataURL("image/jpeg", quality);
+    }
+    return canvas.toDataURL("image/jpeg", quality);
 }
 
 async function compressImageFileToJpegDataUrl(file, maxEdge = 256, quality = 0.82) {
@@ -839,6 +1086,7 @@ async function refreshAuthProfileCache() {
         const { res, data } = await apiJson("/api/users/me");
         if (res.ok) {
             state.authAvatarUrl = data.avatarUrl ?? null;
+            state.preferredGapSolution = data.defaultGapSolution ?? data.DefaultGapSolution ?? null;
         }
     } catch {
         /* ignore */
@@ -858,6 +1106,26 @@ function applyPostAuthNavigation() {
     navigate("home");
 }
 
+/**
+ * Primary top bar: Home, About, Help, Contact, DONATIONS (DONATIONS emphasized in CSS).
+ * @param {null | 'go-home' | 'nav-about' | 'nav-help' | 'nav-contact' | 'nav-donations'} active — `data-action` of current page for aria-current.
+ */
+function topNavPrimaryLinksHtml(active) {
+    const li = (action, label, extraClass = "") => {
+        const cur = active === action;
+        return `<li class="nav-item"><a class="nav-link ${extraClass}${cur ? " active" : ""}" href="#" data-action="${action}"${
+            cur ? ' aria-current="page"' : ""
+        }>${label}</a></li>`;
+    };
+    return `<ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                            ${li("go-home", "Home")}
+                            ${li("nav-about", "About")}
+                            ${li("nav-help", "Help")}
+                            ${li("nav-contact", "Contact")}
+                            ${li("nav-donations", "DONATIONS", "cdm-nav-donations")}
+                        </ul>`;
+}
+
 function wireNav(root) {
     root.querySelectorAll("[data-action='go-home']").forEach((el) => {
         el.addEventListener("click", (e) => {
@@ -865,11 +1133,28 @@ function wireNav(root) {
             navigate("home");
         });
     });
+    for (const [action, view] of /** @type {const} */ ([
+        ["nav-about", "about"],
+        ["nav-help", "help"],
+        ["nav-contact", "contact"],
+        ["nav-donations", "donations"],
+    ])) {
+        root.querySelectorAll(`[data-action='${action}']`).forEach((el) => {
+            el.addEventListener("click", (e) => {
+                e.preventDefault();
+                navigate(view);
+            });
+        });
+    }
     root.querySelectorAll("[data-action='post-item']").forEach((btn) => {
         btn.addEventListener("click", () => {
             if (!requireAuth({ type: "navigate", view: "post" })) return;
             state.editingListingId = null;
             state.postEditPrefill = null;
+            state.pileListingQueue = null;
+            state.pileListingTotal = null;
+            state.pileListingIndex = 0;
+            state.currentAiCropBox = null;
             navigate("post");
         });
     });
@@ -899,6 +1184,15 @@ function wirePostForm(root) {
     const form = root.querySelector("#listing-draft-form");
     if (!form) return;
 
+    if (state.token) {
+        void (async () => {
+            const { res, data } = await apiJson("/api/users/me");
+            if (res.ok) {
+                state.preferredGapSolution = data.defaultGapSolution ?? data.DefaultGapSolution ?? null;
+            }
+        })();
+    }
+
     const titleText = root.querySelector("#post-title-text");
     const subtitleText = root.querySelector("#post-subtitle-text");
     const submitBtn = root.querySelector("#post-submit-btn");
@@ -908,6 +1202,7 @@ function wirePostForm(root) {
     const pickupWrap = root.querySelector("#post-pickup-window-wrap");
     const shipDeliverWrap = root.querySelector("#post-ship-deliver-wrap");
     const aiPanel = root.querySelector("#post-ai-panel");
+    const manualListingPhotoWrap = root.querySelector("#post-manual-listing-photo-wrap");
 
     const prefill = state.postEditPrefill;
     const eid = state.editingListingId;
@@ -943,6 +1238,31 @@ function wirePostForm(root) {
 
     function applyAiSuggestion(s) {
         if (!s || typeof s !== "object") return;
+        state.currentAiCropBox = null;
+        const num = (x) => {
+            if (typeof x === "number" && Number.isFinite(x)) return x;
+            if (x == null || x === "") return NaN;
+            const n = Number(x);
+            return Number.isFinite(n) ? n : NaN;
+        };
+        const cl = num(s.cropLeft ?? s.CropLeft);
+        const ct = num(s.cropTop ?? s.CropTop);
+        const cw = num(s.cropWidth ?? s.CropWidth);
+        const ch = num(s.cropHeight ?? s.CropHeight);
+        if ([cl, ct, cw, ch].every((v) => Number.isFinite(v))) {
+            state.currentAiCropBox = { left: cl, top: ct, width: cw, height: ch };
+        } else {
+            state.currentAiCropBox = null;
+        }
+        const pileN = state.pileListingTotal;
+        if (pileN != null && pileN >= 2) {
+            const cur = state.currentAiCropBox;
+            if (!cur || isNearFullFrameAiCrop(cur)) {
+                const idx = state.pileListingIndex;
+                const fb = pileGridCropBox(idx, pileN);
+                if (fb) state.currentAiCropBox = fb;
+            }
+        }
         if (s.title) setValue("title", s.title);
         if (s.category) setValue("category", s.category);
         if (s.condition) setValue("condition", s.condition);
@@ -950,6 +1270,14 @@ function wirePostForm(root) {
         if (s.description) setValue("description", s.description);
         if (s.listingType) setRadio("listingType", s.listingType);
         if (s.gapSolution) setRadio("gapSolution", s.gapSolution);
+        {
+            const ss = s.spaceSuitability ?? s.SpaceSuitability;
+            setRadio("spaceSuitability", ss && String(ss).trim() ? String(ss).trim() : "any_space");
+        }
+        const pref = state.preferredGapSolution;
+        if (pref && ["storage", "pickup_window", "ship_or_deliver"].includes(String(pref))) {
+            setRadio("gapSolution", pref);
+        }
         if (s.listingType === "sell" && s.price != null && String(s.price).trim() !== "") {
             setValue("price", String(s.price));
         }
@@ -958,6 +1286,49 @@ function wirePostForm(root) {
         }
         syncListingType();
         syncGap();
+    }
+
+    /** Skip is always visible in AI mode; enabled only after Analyze succeeds in pile mode. */
+    function syncPileSkipControl() {
+        const btn = form.querySelector("#post-ai-pile-skip-btn");
+        if (!btn) return;
+        const pileActive = state.pileListingTotal != null && state.pileListingTotal >= 1;
+        btn.disabled = !pileActive;
+        btn.title = pileActive
+            ? "Skip this draft without posting (go to next item if any)."
+            : "Run Analyze with Pile mode on first — then you can skip drafts without posting.";
+    }
+
+    function skipPileDraft() {
+        if (state.pileListingTotal == null) return;
+        if (state.pileListingQueue && state.pileListingQueue.length > 0) {
+            state.pileListingIndex += 1;
+            const next = /** @type {Record<string, unknown>} */ (state.pileListingQueue.shift());
+            applyAiSuggestion(next);
+            updatePileStatus();
+            return;
+        }
+        state.pileListingQueue = null;
+        state.pileListingTotal = null;
+        state.pileListingIndex = 0;
+        state.currentAiCropBox = null;
+        setAiStatus("Skipped — nothing was posted for that draft.");
+        syncPileSkipControl();
+    }
+
+    function updatePileStatus() {
+        const t = state.pileListingTotal;
+        const i = state.pileListingIndex;
+        const q = state.pileListingQueue?.length ?? 0;
+        if (t == null || t < 1) {
+            setAiStatus("");
+            syncPileSkipControl();
+            return;
+        }
+        setAiStatus(
+            `Item ${i} of ${t} (same photo). ${q} more queued — publish, or use Skip to drop this draft. Cropped preview uses AI box when possible.`
+        );
+        syncPileSkipControl();
     }
 
     if (titleText) titleText.textContent = isEditing ? "Edit listing" : "Post an item";
@@ -971,6 +1342,17 @@ function wirePostForm(root) {
     function syncListingMode() {
         const ai = form.querySelector('input[name="listingMode"]:checked')?.value === "ai";
         if (aiPanel) aiPanel.classList.toggle("d-none", !ai);
+        if (manualListingPhotoWrap) manualListingPhotoWrap.classList.toggle("d-none", ai);
+        const photoInput = form.querySelector("#post-photo");
+        if (photoInput instanceof HTMLInputElement) {
+            if (ai) {
+                photoInput.removeAttribute("required");
+                photoInput.value = "";
+            } else if (!isEditing) {
+                photoInput.setAttribute("required", "");
+            }
+        }
+        syncPileSkipControl();
     }
 
     function syncListingType() {
@@ -995,8 +1377,9 @@ function wirePostForm(root) {
         setCheckbox("aiPileMode", false);
         setValue("title", prefill.title);
         setValue("category", prefill.category);
-        setValue("condition", "good");
-        setValue("dimensions", "");
+        const condRaw = prefill.condition ?? prefill.Condition ?? "good";
+        setValue("condition", String(condRaw).trim() || "good");
+        setValue("dimensions", prefill.dimensions ?? prefill.Dimensions ?? "");
         setValue("description", prefill.description);
         const p = Number(prefill.price);
         setRadio("listingType", p === 0 ? "donate" : "sell");
@@ -1009,6 +1392,8 @@ function wirePostForm(root) {
         setValue("pickupEnd", toDateInputValue(prefill.pickupEnd));
         setValue("pickupLocation", prefill.pickupLocation);
         setValue("deliveryNotes", prefill.deliveryNotes);
+        const ssRaw = prefill.spaceSuitability ?? prefill.SpaceSuitability ?? "any_space";
+        setRadio("spaceSuitability", String(ssRaw).trim() === "small_dorm" ? "small_dorm" : "any_space");
     }
 
     syncListingMode();
@@ -1032,11 +1417,13 @@ function wirePostForm(root) {
                 alert("AI mode: pick a photo first.");
                 return;
             }
-            setAiStatus("Analyzing…");
+            const pileOn = form.querySelector("#post-ai-pile")?.checked === true;
+            setAiStatus(pileOn ? "Analyzing (pile mode)…" : "Analyzing…");
             aiAnalyzeBtn.disabled = true;
             try {
                 const body = new FormData();
                 body.append("image", f, f.name || "image.jpg");
+                body.append("pile", pileOn ? "true" : "false");
                 const res = await fetch(`${API_BASE}/api/ai/listing-from-image`, {
                     method: "POST",
                     body,
@@ -1051,8 +1438,28 @@ function wirePostForm(root) {
                     alert(msg);
                     return;
                 }
-                applyAiSuggestion(data);
-                setAiStatus("Suggestions applied. Review and edit before publishing.");
+                const listingsRaw = data.listings ?? data.Listings;
+                if (pileOn) {
+                    if (!listingsRaw || !Array.isArray(listingsRaw) || listingsRaw.length === 0) {
+                        setAiStatus("");
+                        alert(
+                            "Pile mode: the server didn’t return a listings array. Try again, or analyze without pile mode."
+                        );
+                        return;
+                    }
+                    state.pileListingTotal = listingsRaw.length;
+                    state.pileListingQueue = listingsRaw.slice(1);
+                    state.pileListingIndex = 1;
+                    applyAiSuggestion(listingsRaw[0]);
+                    updatePileStatus();
+                } else {
+                    state.pileListingTotal = null;
+                    state.pileListingQueue = null;
+                    state.pileListingIndex = 0;
+                    applyAiSuggestion(data);
+                    setAiStatus("Suggestions applied. Review and edit before publishing.");
+                    syncPileSkipControl();
+                }
             } catch (e) {
                 console.error(e);
                 setAiStatus("");
@@ -1062,6 +1469,8 @@ function wirePostForm(root) {
             }
         });
     }
+
+    form.querySelector("#post-ai-pile-skip-btn")?.addEventListener("click", () => skipPileDraft());
 
     form.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -1096,6 +1505,23 @@ function wirePostForm(root) {
         if (listingPhotoFile) {
             try {
                 photoDataUrl = await compressImageFileToJpegDataUrl(listingPhotoFile, 1600, 0.86);
+                if (
+                    fd.get("listingMode") === "ai" &&
+                    state.currentAiCropBox &&
+                    photoDataUrl &&
+                    shouldApplyAiCrop(state.currentAiCropBox)
+                ) {
+                    try {
+                        photoDataUrl = await cropDataUrlToNormalizedJpeg(
+                            photoDataUrl,
+                            state.currentAiCropBox,
+                            1600,
+                            0.86
+                        );
+                    } catch {
+                        /* keep uncropped */
+                    }
+                }
             } catch {
                 alert("Couldn’t read the selected image. Try a different file.");
                 return;
@@ -1114,6 +1540,7 @@ function wirePostForm(root) {
             listingType: fd.get("listingType"),
             price: fd.get("price"),
             gapSolution: fd.get("gapSolution"),
+            spaceSuitability: fd.get("spaceSuitability"),
             storageNotes: fd.get("storageNotes"),
             pickupStart: fd.get("pickupStart"),
             pickupEnd: fd.get("pickupEnd"),
@@ -1150,7 +1577,10 @@ function wirePostForm(root) {
             description: String(draft.description || "").trim() || null,
             price: draft.listingType === "donate" ? 0 : Number(draft.price),
             category: draft.category ? String(draft.category).trim() : null,
+            condition: draft.condition ? String(draft.condition).trim() : null,
+            dimensions: draft.dimensions ? String(draft.dimensions).trim() : null,
             gapSolution: draft.gapSolution ? String(draft.gapSolution).trim() : null,
+            spaceSuitability: draft.spaceSuitability === "small_dorm" ? "small_dorm" : "any_space",
             storageNotes: draft.storageNotes ? String(draft.storageNotes).trim() : null,
             pickupStart: draft.pickupStart ? String(draft.pickupStart).trim() : null,
             pickupEnd: draft.pickupEnd ? String(draft.pickupEnd).trim() : null,
@@ -1181,11 +1611,122 @@ function wirePostForm(root) {
             alert(msg);
             return;
         }
+        if (
+            !editingNow &&
+            state.pileListingQueue &&
+            Array.isArray(state.pileListingQueue) &&
+            state.pileListingQueue.length > 0
+        ) {
+            state.pileListingIndex += 1;
+            const next = /** @type {Record<string, unknown>} */ (state.pileListingQueue.shift());
+            applyAiSuggestion(next);
+            updatePileStatus();
+            console.log("Posted listing; loading next pile item:", data);
+            return;
+        }
         state.editingListingId = null;
         state.postEditPrefill = null;
+        state.pileListingQueue = null;
+        state.pileListingTotal = null;
+        state.pileListingIndex = 0;
+        state.currentAiCropBox = null;
         console.log(editingNow ? "Updated listing (API):" : "Posted listing (API):", data);
         navigate("my-listings");
     });
+
+    if (state.pileListingTotal != null) {
+        updatePileStatus();
+    } else {
+        syncPileSkipControl();
+    }
+}
+
+function renderStaticSitePage() {
+    const root = document.getElementById("app");
+    const page = state.view;
+    /** @type {Record<string, { title: string, html: string }>} */
+    const sections = {
+        about: {
+            title: "About",
+            html: `<p class="mb-0">Campus Dorm Marketplace connects students moving out with students moving in—list what you no longer need and find what your room is missing. Built for on-campus housing workflows (dorms, suites, and move dates).</p>`,
+        },
+        help: {
+            title: "Help",
+            html: `<p class="mb-3">Use the home feed to browse listings; filters narrow by campus, category, and how you want to pay. Posting requires an account—add photos, set price or donate, and pick pickup or delivery options.</p>
+                <p class="mb-0 cdm-muted small">Problems with login or a listing? Use Contact and include your school email and listing title if relevant.</p>`,
+        },
+        contact: {
+            title: "Contact",
+            html: `<p class="mb-0">Reach the team at <a href="mailto:support@example.edu">support@example.edu</a> (replace with your real address). For urgent safety issues, use your campus’s official reporting channels.</p>`,
+        },
+        donations: {
+            title: "Donations",
+            html: `<p class="mb-3">Support reuse on campus: share this marketplace with your hall, RA staff, and student orgs so fewer usable items end up in dumpsters during move-out.</p>
+                <p class="mb-0">If you run a fund drive or nonprofit tie-in, add your payment or volunteer link here when you wire up payments.</p>`,
+        },
+    };
+    const meta = sections[page];
+    if (!meta) return;
+
+    const activeByView = {
+        about: "nav-about",
+        help: "nav-help",
+        contact: "nav-contact",
+        donations: "nav-donations",
+    };
+    const active = activeByView[page];
+
+    root.innerHTML = "";
+
+    const shell = el(`
+        <div class="cdm-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+
+                    <button
+                        class="navbar-toggler"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavStatic"
+                        aria-controls="cdmNavStatic"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+
+                    <div class="collapse navbar-collapse" id="cdmNavStatic">
+                        ${topNavPrimaryLinksHtml(active)}
+
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                            <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <div class="body-content cdm-body-content">
+                <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    <button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="go-home">
+                        ← Back to home
+                    </button>
+
+                    <div class="cdm-surface p-4 p-lg-5 mt-2">
+                        <h1 class="h3 cdm-title mb-3">${meta.title}</h1>
+                        ${meta.html}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
 }
 
 async function renderProfile() {
@@ -1214,11 +1755,7 @@ async function renderProfile() {
                     </button>
 
                     <div class="collapse navbar-collapse" id="cdmNavProfile">
-                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
-                        </ul>
+                        ${topNavPrimaryLinksHtml(null)}
 
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
@@ -1261,9 +1798,6 @@ async function renderProfile() {
                                 <label class="form-label">Profile picture</label>
                                 <div class="d-flex flex-wrap align-items-center gap-3 mb-2">
                                     <img id="profile-avatar-preview" class="cdm-avatar-preview rounded-circle border" width="96" height="96" alt="" />
-                                    <div class="small cdm-muted">
-                                        Default is the illustration below. Upload your own image to replace it.
-                                    </div>
                                 </div>
                                 <input type="hidden" id="profile-avatar-value" value="" />
                                 <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
@@ -1298,6 +1832,26 @@ async function renderProfile() {
                             <div class="col-12 col-md-4">
                                 <label class="form-label">Suite letter (optional)</label>
                                 <input id="profile-suite" class="form-control" type="text" maxlength="1" placeholder="A-D" />
+                            </div>
+                            <div class="col-12 col-md-8">
+                                <label class="form-label" for="profile-default-gap">Default fulfillment when you sell</label>
+                                <select id="profile-default-gap" class="form-select">
+                                    <option value="">No default — choose per listing</option>
+                                    <option value="storage">Item left on campus — buyer picks up there</option>
+                                    <option value="pickup_window">Buyer picks up from you (dorm / agreed spot)</option>
+                                    <option value="ship_or_deliver">You ship or deliver</option>
+                                </select>
+                                <div class="form-text">Starting option for “How will the buyer get the item?” when AI fills a listing. Override anytime.</div>
+                            </div>
+                            <div class="col-12 col-md-8">
+                                <label class="form-label" for="profile-preferred-receive">Preferred delivery / pickup (when you buy)</label>
+                                <select id="profile-preferred-receive" class="form-select">
+                                    <option value="">No preference</option>
+                                    <option value="storage">Pick up on campus (item left in storage / agreed spot)</option>
+                                    <option value="pickup_window">Meet the seller for pickup</option>
+                                    <option value="ship_or_deliver">Delivery or shipping</option>
+                                </select>
+                                <div class="form-text">Optional — for your own reference when you message sellers.</div>
                             </div>
                             <div class="col-12 d-flex gap-2">
                                 <button class="btn cdm-btn-crimson" type="submit">Save changes</button>
@@ -1343,6 +1897,16 @@ async function renderProfile() {
     shell.querySelector("#profile-oncampus").value = String(Boolean(data.livesOnCampus));
     shell.querySelector("#profile-dorm").value = data.dormBuilding ?? "";
     shell.querySelector("#profile-suite").value = data.suiteLetter ?? "";
+    const gapSel = shell.querySelector("#profile-default-gap");
+    if (gapSel) {
+        const g = data.defaultGapSolution ?? data.DefaultGapSolution ?? "";
+        gapSel.value = ["storage", "pickup_window", "ship_or_deliver"].includes(String(g)) ? g : "";
+    }
+    const receiveSel = shell.querySelector("#profile-preferred-receive");
+    if (receiveSel) {
+        const r = data.preferredReceiveGap ?? data.PreferredReceiveGap ?? "";
+        receiveSel.value = ["storage", "pickup_window", "ship_or_deliver"].includes(String(r)) ? r : "";
+    }
 
     const getAvatarUrlForSave = wireProfileAvatar(shell, data.avatarUrl ?? null);
 
@@ -1357,6 +1921,8 @@ async function renderProfile() {
             livesOnCampus: shell.querySelector("#profile-oncampus")?.value === "true",
             dormBuilding: shell.querySelector("#profile-dorm")?.value?.trim() || null,
             suiteLetter: shell.querySelector("#profile-suite")?.value?.trim() || null,
+            defaultGapSolution: shell.querySelector("#profile-default-gap")?.value?.trim() || null,
+            preferredReceiveGap: shell.querySelector("#profile-preferred-receive")?.value?.trim() || null,
         };
 
         const out = await apiJson("/api/users/me", { method: "PUT", body: JSON.stringify(body) });
@@ -1365,6 +1931,7 @@ async function renderProfile() {
             return;
         }
         state.authAvatarUrl = out.data.avatarUrl ?? null;
+        state.preferredGapSolution = out.data.defaultGapSolution ?? out.data.DefaultGapSolution ?? null;
         showOk("Saved.");
         renderAuthNav();
     });
@@ -1445,6 +2012,8 @@ function renderAuthNav() {
         state.token = null;
         state.authEmail = null;
         state.authAvatarUrl = null;
+        state.preferredGapSolution = null;
+        state.currentAiCropBox = null;
         setStoredToken(null);
         render();
     });
@@ -1534,6 +2103,16 @@ function buildAuthFormsMarkup(loginPanelVisible) {
                                 </div>
                             </div>
                             <div class="mb-3">
+                                <label class="form-label" for="signup-default-gap">Default: how buyers get items you sell (optional)</label>
+                                <select class="form-select cdm-input" id="signup-default-gap">
+                                    <option value="">Choose per listing later</option>
+                                    <option value="storage">Item left on campus — buyer picks up there</option>
+                                    <option value="pickup_window">Buyer picks up from you (dorm / agreed spot)</option>
+                                    <option value="ship_or_deliver">You ship or deliver</option>
+                                </select>
+                                <div class="form-text">You can change this anytime in Profile. AI-filled listings start here.</div>
+                            </div>
+                            <div class="mb-3">
                                 <label class="form-label" for="signup-move">Move-in date</label>
                                 <input class="form-control cdm-input" id="signup-move" type="date" required />
                             </div>
@@ -1578,9 +2157,7 @@ function renderAuth() {
                     </button>
 
                     <div class="collapse navbar-collapse" id="cdmNavAuth">
-                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
-                        </ul>
+                        ${topNavPrimaryLinksHtml("go-home")}
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
                         </div>
@@ -1719,6 +2296,7 @@ function wireAuthPage() {
         const dorm = document.getElementById("signup-dorm")?.value?.trim() ?? "";
         const needsSuite = Boolean(dorm && UA_DORM_BY_VALUE.get(dorm) === true);
         const suite = needsSuite ? document.getElementById("signup-suite")?.value : null;
+        const defaultGapRaw = document.getElementById("signup-default-gap")?.value?.trim() ?? "";
 
         const body = {
             email,
@@ -1730,6 +2308,7 @@ function wireAuthPage() {
             dormBuilding: onCampus ? dorm : null,
             suiteLetter: onCampus && needsSuite ? suite : null,
             requiresSuiteLetter: onCampus ? needsSuite : null,
+            defaultGapSolution: defaultGapRaw || null,
         };
 
         try {
@@ -1772,13 +2351,28 @@ function ensureAuthUi() {
 }
 
 function buildHomeFiltersHtml() {
-    const campusChecks = FEED_FILTER_CAMPUSES.map(
-        (c) => `
+    const categoryOpts = [
+        ["bedding", categoryLabel.bedding],
+        ["appliance", "Appliances (mini-fridge, microwave, …)"],
+        ["cookware", categoryLabel.cookware],
+        ["decor", categoryLabel.decor],
+        ["electronics", categoryLabel.electronics],
+        ["furniture", categoryLabel.furniture],
+        ["storage", categoryLabel.storage],
+        ["lighting", categoryLabel.lighting],
+        ["textbooks", categoryLabel.textbooks],
+        ["other", categoryLabel.other],
+    ];
+    const categoryChecks = categoryOpts
+        .map(([k, lab]) => {
+            const safeId = String(k).replace(/[^a-z0-9_]/gi, "x");
+            return `
     <div class="form-check">
-      <input class="form-check-input" type="checkbox" id="ff-campus-${c.id}" data-filter-campus="${c.id}" />
-      <label class="form-check-label small" for="ff-campus-${c.id}">${escapeHtml(c.label)}</label>
-    </div>`,
-    ).join("");
+      <input class="form-check-input" type="checkbox" id="ff-cat-${safeId}" data-filter-cat="${escapeHtml(k)}" />
+      <label class="form-check-label small" for="ff-cat-${safeId}">${escapeHtml(lab)}</label>
+    </div>`;
+        })
+        .join("");
 
     const gapOpts = [
         ["storage", "Left with campus / storage"],
@@ -1798,6 +2392,22 @@ function buildHomeFiltersHtml() {
         })
         .join("");
 
+    const spaceOpts = [
+        ["small_dorm", spaceSuitabilityLabel.small_dorm],
+        ["any_space", spaceSuitabilityLabel.any_space],
+        ["__none__", "Not specified"],
+    ];
+    const spaceChecks = spaceOpts
+        .map(([k, lab]) => {
+            const safeId = String(k).replace(/[^a-z0-9_]/gi, "x");
+            return `
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" id="ff-space-${safeId}" data-filter-space="${escapeHtml(k)}" />
+      <label class="form-check-label small" for="ff-space-${safeId}">${escapeHtml(lab)}</label>
+    </div>`;
+        })
+        .join("");
+
     return `
     <div class="cdm-card p-3 p-lg-4 mb-3" id="cdm-feed-filters">
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-1">
@@ -1805,16 +2415,6 @@ function buildHomeFiltersHtml() {
         <button type="button" class="btn btn-link btn-sm py-0 px-0 text-decoration-none" id="cdm-filter-clear">Clear all</button>
       </div>
       <p class="cdm-muted small mb-3">Use the menus below — pick multiple checkboxes per group. Empty group = show all.</p>
-
-      <div class="dropdown w-100 mb-2">
-        <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" id="cdm-filter-school-btn" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
-          <span class="fw-semibold small">School</span>
-          <span id="cdm-filter-school-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
-        </button>
-        <div class="dropdown-menu dropdown-menu-end shadow-sm border-0 p-3 cdm-filter-menu" style="min-width: 100%">
-          ${campusChecks}
-        </div>
-      </div>
 
       <div class="dropdown w-100 mb-2">
         <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
@@ -1835,7 +2435,17 @@ function buildHomeFiltersHtml() {
 
       <div class="dropdown w-100 mb-2">
         <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
-          <span class="fw-semibold small">Gap solution</span>
+          <span class="fw-semibold small">Category</span>
+          <span id="cdm-filter-category-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
+        </button>
+        <div class="dropdown-menu dropdown-menu-end shadow-sm border-0 p-3 cdm-filter-menu" style="min-width: 100%">
+          ${categoryChecks}
+        </div>
+      </div>
+
+      <div class="dropdown w-100 mb-2">
+        <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+          <span class="fw-semibold small">Delivery type</span>
           <span id="cdm-filter-gap-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
         </button>
         <div class="dropdown-menu dropdown-menu-end shadow-sm border-0 p-3 cdm-filter-menu" style="min-width: 100%">
@@ -1845,19 +2455,11 @@ function buildHomeFiltersHtml() {
 
       <div class="dropdown w-100">
         <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
-          <span class="fw-semibold small">Payment</span>
-          <span id="cdm-filter-pay-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
+          <span class="fw-semibold small">Dorm space</span>
+          <span id="cdm-filter-space-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
         </button>
         <div class="dropdown-menu dropdown-menu-end shadow-sm border-0 p-3 cdm-filter-menu" style="min-width: 100%">
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="ff-pay-cash" data-filter-pay="cash" />
-            <label class="form-check-label small" for="ff-pay-cash">Cash</label>
-          </div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="ff-pay-card" data-filter-pay="card" />
-            <label class="form-check-label small" for="ff-pay-card">Card</label>
-          </div>
-          <p class="form-text small mt-2 mb-0">Demo cards include a preference. Live listings may not — those still show when payment filters are on.</p>
+          ${spaceChecks}
         </div>
       </div>
     </div>`;
@@ -1891,12 +2493,7 @@ async function renderHome() {
                     </button>
 
                     <div class="collapse navbar-collapse" id="cdmNav">
-                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                            <li class="nav-item"><a class="nav-link" href="#" aria-current="page">Home</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Events</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Schools</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Help</a></li>
-                        </ul>
+                        ${topNavPrimaryLinksHtml("go-home")}
 
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
@@ -1934,13 +2531,39 @@ async function renderHome() {
                             </div>
                         </div>
 
-                        <div class="d-flex flex-wrap gap-2 mt-3">
-                            <a class="cdm-chip" href="#" aria-disabled="true">🛏️ Twin XL bedding</a>
-                            <a class="cdm-chip" href="#" aria-disabled="true">🧊 Mini-fridges</a>
-                            <a class="cdm-chip" href="#" aria-disabled="true">🍽 Microwaves</a>
-                            <a class="cdm-chip" href="#" aria-disabled="true">🪑 Furniture</a>
-                            <a class="cdm-chip" href="#" aria-disabled="true">💡 Lighting</a>
-                            <a class="cdm-chip" href="#" aria-disabled="true">📚 Textbooks</a>
+                        <div
+                            class="d-flex flex-wrap gap-2 mt-3"
+                            id="cdm-feed-category-chips"
+                            role="group"
+                            aria-label="Filter by category"
+                        >
+                            <button type="button" class="cdm-chip" data-feed-chip="bedding" aria-pressed="false">
+                                🛏️ Twin XL bedding
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="mini_fridge" aria-pressed="false">
+                                🧊 Mini-fridges
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="microwave" aria-pressed="false">
+                                🍽 Microwaves
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="furniture" aria-pressed="false">
+                                🪑 Furniture
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="lighting" aria-pressed="false">
+                                💡 Lighting
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="textbooks" aria-pressed="false">
+                                📚 Textbooks
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="cookware" aria-pressed="false">
+                                🍳 Cookware
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="decor" aria-pressed="false">
+                                🖼 Decor
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="electronics" aria-pressed="false">
+                                🔌 Electronics
+                            </button>
                         </div>
                     </div>
 
@@ -1949,24 +2572,21 @@ async function renderHome() {
                             <div class="cdm-rail">
                                 ${buildHomeFiltersHtml()}
 
-                                <div class="cdm-card p-3 p-lg-4">
-                                    <div class="fw-semibold mb-1">Quick Links</div>
-                                    <div class="cdm-linklist mt-2">
-                                        <a href="#" aria-disabled="true">
-                                            <span>
-                                                <div class="fw-semibold">Seller’s choice</div>
-                                                <div class="cdm-linkmeta">Sell or donate + 7% seller fee</div>
-                                            </span>
-                                            <span class="cdm-muted">›</span>
-                                        </a>
-                                        <a href="#" aria-disabled="true">
-                                            <span>
-                                                <div class="fw-semibold">The 3‑month gap</div>
-                                                <div class="cdm-linkmeta">Storage / pickup window / donate</div>
-                                            </span>
-                                            <span class="cdm-muted">›</span>
-                                        </a>
-                                    </div>
+                                <div class="cdm-card p-0 overflow-hidden cdm-donations-rail-card">
+                                    <a
+                                        href="#"
+                                        class="cdm-donations-rail-link text-decoration-none text-reset d-block p-3 p-lg-4"
+                                        data-action="nav-donations"
+                                    >
+                                        <div class="cdm-donations-rail-title mb-2 text-center">Donations</div>
+                                        <div class="d-flex align-items-start justify-content-between gap-2">
+                                            <p class="small cdm-muted mb-0 min-w-0">
+                                                Route usable items to campus partners instead of the dumpster—no seller fee. Tap for how
+                                                donating works here.
+                                            </p>
+                                            <span class="cdm-muted flex-shrink-0 pt-1" aria-hidden="true">›</span>
+                                        </div>
+                                    </a>
                                 </div>
                             </div>
                         </aside>
@@ -2221,6 +2841,8 @@ async function renderHome() {
 
     root.appendChild(shell);
     wireNav(shell);
+    wireHomeFeedSearch(shell);
+    wireHomeQuickCategoryChips(shell);
     wireHomeFeedFilters(shell);
     ensureAuthUi();
     hydrateFeedListingImages(shell);
@@ -2289,15 +2911,7 @@ async function renderPost() {
                     </button>
 
                     <div class="collapse navbar-collapse" id="cdmNavPost">
-                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
-                            ${
-                                state.token
-                                    ? `<li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>`
-                                    : ""
-                            }
-                            <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Help</a></li>
-                        </ul>
+                        ${topNavPrimaryLinksHtml(null)}
 
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
@@ -2362,22 +2976,38 @@ async function renderPost() {
                                     <div class="rounded-3 p-3 cdm-ai-panel">
                                         <div class="fw-semibold mb-2">Snap &amp; List</div>
                                         <p class="cdm-muted small mb-3">
-                                            Take a clear photo of the item (or multiple items in <strong>pile mode</strong>). Analysis is not connected yet — this is the UI hook.
+                                            Take a clear photo of one item, or a <strong>pile</strong> of several. Turn on pile mode to get a separate draft for each visible item — publish them one at a time (same photo for each).
                                         </p>
                                         <label class="form-label small" for="post-ai-photo">Photo</label>
                                         <input class="form-control form-control-sm mb-2" type="file" id="post-ai-photo" name="aiPhoto" accept="image/*" capture="environment" />
+                                        <div class="cdm-pile-mode-box mb-3" role="group" aria-labelledby="post-ai-pile-label">
+                                            <div class="d-flex gap-3 align-items-start">
+                                                <input
+                                                    class="form-check-input cdm-pile-mode-check flex-shrink-0"
+                                                    type="checkbox"
+                                                    id="post-ai-pile"
+                                                    name="aiPileMode"
+                                                />
+                                                <div class="flex-grow-1 min-w-0">
+                                                    <label class="form-check-label d-block mb-1" for="post-ai-pile" id="post-ai-pile-label">
+                                                        <span class="cdm-pile-mode-title">Pile mode</span>
+                                                        <span class="badge rounded-pill ms-2 align-middle fw-normal border bg-white text-secondary">Optional</span>
+                                                    </label>
+                                                    <p class="small cdm-muted mb-0">
+                                                        Multiple items in one photo → a separate draft for each. Check this <em>before</em> Analyze photo.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
                                         <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
                                             <button type="button" class="btn btn-sm btn-outline-dark" id="post-ai-analyze-btn">Analyze photo</button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="post-ai-pile-skip-btn" disabled>Skip (don’t post)</button>
                                             <span class="small cdm-muted" id="post-ai-status"></span>
-                                        </div>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="checkbox" id="post-ai-pile" name="aiPileMode" />
-                                            <label class="form-check-label small" for="post-ai-pile">Pile mode — one photo, multiple items (AI splits into separate listings later)</label>
                                         </div>
                                     </div>
                                 </div>
 
-                                <div class="col-12">
+                                <div class="col-12" id="post-manual-listing-photo-wrap">
                                     <label class="form-label fw-semibold" for="post-photo">Listing photo</label>
                                     <input class="form-control" type="file" id="post-photo" name="photo" accept="image/*" ${isEdit ? "" : "required"} />
                                     <div class="cdm-muted small mt-1">${
@@ -2402,6 +3032,9 @@ async function renderPost() {
                                         <option value="storage">Storage / organizers</option>
                                         <option value="lighting">Lighting</option>
                                         <option value="textbooks">Textbooks</option>
+                                        <option value="cookware">Cookware & cooking supplies</option>
+                                        <option value="decor">Decor</option>
+                                        <option value="electronics">Electronics</option>
                                         <option value="other">Other</option>
                                     </select>
                                 </div>
@@ -2420,6 +3053,21 @@ async function renderPost() {
                                 <div class="col-12">
                                     <label class="form-label fw-semibold" for="post-dimensions">Dimensions (optional)</label>
                                     <input class="form-control" id="post-dimensions" name="dimensions" type="text" placeholder='e.g., 18" W × 20" D × 34" H' />
+                                </div>
+
+                                <div class="col-12">
+                                    <span class="form-label fw-semibold d-block mb-2">Space fit</span>
+                                    <div class="cdm-muted small mb-2">Is this item mainly for a tight dorm room, or does it work anywhere?</div>
+                                    <div class="d-flex flex-wrap gap-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="spaceSuitability" id="ss-small" value="small_dorm" />
+                                            <label class="form-check-label" for="ss-small">Best for a small dorm room</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="spaceSuitability" id="ss-any" value="any_space" checked />
+                                            <label class="form-check-label" for="ss-any">Works in any space</label>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <div class="col-12">
@@ -2666,6 +3314,11 @@ function listingCardApiHtml(row) {
     const cat = escapeHtml(categoryLabel[row.category] || row.category || "—");
     const priceNum = Number(row.price);
     const priceLabel = priceNum === 0 ? "Free" : `$${escapeHtml(priceNum.toFixed(2))}`;
+    const condRaw = row.condition ?? row.Condition ?? null;
+    const condBit =
+        condRaw != null && String(condRaw).trim() !== ""
+            ? ` · ${escapeHtml(formatListingCondition(condRaw))}`
+            : "";
     const desc = row.description
         ? escapeHtml(row.description.slice(0, 160)) + (row.description.length > 160 ? "…" : "")
         : "—";
@@ -2687,7 +3340,7 @@ function listingCardApiHtml(row) {
                     ${thumb}
                     <div>
                         <div class="fw-semibold">${title}</div>
-                        <div class="cdm-muted small">${cat} · ${priceLabel} · <span class="badge rounded-pill text-bg-light border">Published</span></div>
+                        <div class="cdm-muted small">${cat} · ${priceLabel}${condBit} · <span class="badge rounded-pill text-bg-light border">Published</span></div>
                     </div>
                 </div>
                 <div class="d-flex flex-wrap gap-2 justify-content-end">
@@ -2767,7 +3420,12 @@ function renderListingDbFromApi(L) {
             : `<span class="cdm-price-currency text-muted me-1">$</span><span class="display-6 fw-bold text-dark">${escapeHtml(priceNum.toFixed(2))}</span>`;
 
     const titleHtml = escapeHtml(L.title);
-    const subtitleHtml = `${escapeHtml(L.category || "Listing")} · <span class="text-body">${escapeHtml(L.sellerDisplayName || "Seller")}</span>`;
+    const conditionRaw = L.condition ?? L.Condition ?? null;
+    const condSubtitle =
+        conditionRaw != null && String(conditionRaw).trim() !== ""
+            ? ` · <span class="text-body">${escapeHtml(formatListingCondition(conditionRaw))}</span>`
+            : "";
+    const subtitleHtml = `${escapeHtml(L.category || "Listing")} · <span class="text-body">${escapeHtml(L.sellerDisplayName || "Seller")}</span>${condSubtitle}`;
     const posted =
         L.createdAt != null ? escapeHtml(new Date(L.createdAt).toLocaleString()) : "—";
 
@@ -2784,12 +3442,29 @@ function renderListingDbFromApi(L) {
         <span class="fw-semibold text-dark">${escapeHtml(L.sellerDisplayName || "—")}</span>
       </div>`;
 
+    const dimensionsRaw = L.dimensions ?? L.Dimensions ?? null;
+    const dimRow =
+        dimensionsRaw != null && String(dimensionsRaw).trim() !== ""
+            ? `<dt class="col-5 col-sm-4 cdm-muted">Dimensions</dt>
+        <dd class="col-7 col-sm-8 mb-2">${escapeHtml(String(dimensionsRaw).trim())}</dd>`
+            : "";
+    const spaceRaw = L.spaceSuitability ?? L.SpaceSuitability ?? null;
+    const spaceK = spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
+    const spaceRow =
+        spaceK != null
+            ? `<dt class="col-5 col-sm-4 cdm-muted">Space fit</dt>
+        <dd class="col-7 col-sm-8 mb-2">${escapeHtml(spaceSuitabilityLabel[spaceK] ?? spaceK)}</dd>`
+            : "";
     const metaRowsHtml = `
       <dl class="row small mb-0 cdm-listing-meta">
         <dt class="col-5 col-sm-4 cdm-muted">Listing #</dt>
         <dd class="col-7 col-sm-8 mb-2">${escapeHtml(String(L.listingId))}</dd>
         <dt class="col-5 col-sm-4 cdm-muted">Status</dt>
         <dd class="col-7 col-sm-8 mb-2">${escapeHtml(L.status || "—")}</dd>
+        <dt class="col-5 col-sm-4 cdm-muted">Condition</dt>
+        <dd class="col-7 col-sm-8 mb-2">${escapeHtml(formatListingCondition(conditionRaw))}</dd>
+        ${dimRow}
+        ${spaceRow}
         <dt class="col-5 col-sm-4 cdm-muted">Posted</dt>
         <dd class="col-7 col-sm-8 mb-0">${posted}</dd>
       </dl>`;
@@ -3011,11 +3686,7 @@ function renderListingSyncInner() {
                     </button>
 
                     <div class="collapse navbar-collapse" id="cdmNavListing">
-                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
-                        </ul>
+                        ${topNavPrimaryLinksHtml(null)}
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
                         </div>
@@ -3107,12 +3778,7 @@ async function renderMyListings() {
                     </button>
 
                     <div class="collapse navbar-collapse" id="cdmNavMyListings">
-                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
-                            <li class="nav-item"><a class="nav-link active" href="#" aria-current="page">My listings</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
-                            <li class="nav-item"><a class="nav-link" href="#" aria-disabled="true">Help</a></li>
-                        </ul>
+                        ${topNavPrimaryLinksHtml(null)}
 
                         <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
                             <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
@@ -3163,6 +3829,13 @@ function render() {
         void renderListing();
     } else if (state.view === "profile") {
         void renderProfile();
+    } else if (
+        state.view === "about" ||
+        state.view === "help" ||
+        state.view === "contact" ||
+        state.view === "donations"
+    ) {
+        renderStaticSitePage();
     } else {
         void renderHome();
     }

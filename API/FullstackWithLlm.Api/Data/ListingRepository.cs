@@ -34,11 +34,28 @@ public sealed class ListingRepository
 
         try
         {
-            return await ReadFeedWithGapAsync(conn, limit, campusId, excludeSellerId, cancellationToken);
+            return await ReadFeedWithGapAsync(
+                conn, limit, campusId, excludeSellerId, includeItemCondition: true, includeSpaceSuitability: true, cancellationToken);
         }
         catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
         {
-            return await ReadFeedMinimalAsync(conn, limit, campusId, excludeSellerId, cancellationToken);
+            try
+            {
+                return await ReadFeedWithGapAsync(
+                    conn, limit, campusId, excludeSellerId, includeItemCondition: true, includeSpaceSuitability: false, cancellationToken);
+            }
+            catch (Exception ex1) when (AsMySqlException(ex1) is { } mx1 && IsUnknownColumnOrBadFieldError(mx1))
+            {
+                try
+                {
+                    return await ReadFeedWithGapAsync(
+                        conn, limit, campusId, excludeSellerId, includeItemCondition: false, includeSpaceSuitability: false, cancellationToken);
+                }
+                catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
+                {
+                    return await ReadFeedMinimalAsync(conn, limit, campusId, excludeSellerId, cancellationToken);
+                }
+            }
         }
     }
 
@@ -47,9 +64,13 @@ public sealed class ListingRepository
         int limit,
         int? campusId,
         int? excludeSellerId,
+        bool includeItemCondition,
+        bool includeSpaceSuitability,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var conditionCol = includeItemCondition ? "l.item_condition,\n                " : "";
+        var spaceCol = includeSpaceSuitability ? "l.space_suitability,\n                " : "";
+        var sql = $"""
             SELECT
                 l.listing_id,
                 l.seller_id,
@@ -58,8 +79,8 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.gap_solution,
-                l.image_url,
+                {conditionCol}l.gap_solution,
+                {spaceCol}l.image_url,
                 l.status,
                 l.created_at,
                 u.display_name AS seller_display_name
@@ -81,7 +102,7 @@ public sealed class ListingRepository
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            list.Add(MapFeedRowWithGap(reader));
+            list.Add(MapFeedRowWithGap(reader, includeItemCondition, includeSpaceSuitability));
         }
 
         return list;
@@ -141,11 +162,25 @@ public sealed class ListingRepository
 
         try
         {
-            return await ReadMineWithGapAsync(conn, sellerId, limit, cancellationToken);
+            return await ReadMineWithGapAsync(conn, sellerId, limit, includeItemCondition: true, includeSpaceSuitability: true, cancellationToken);
         }
         catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
         {
-            return await ReadMineMinimalAsync(conn, sellerId, limit, cancellationToken);
+            try
+            {
+                return await ReadMineWithGapAsync(conn, sellerId, limit, includeItemCondition: true, includeSpaceSuitability: false, cancellationToken);
+            }
+            catch (Exception ex1) when (AsMySqlException(ex1) is { } mx1 && IsUnknownColumnOrBadFieldError(mx1))
+            {
+                try
+                {
+                    return await ReadMineWithGapAsync(conn, sellerId, limit, includeItemCondition: false, includeSpaceSuitability: false, cancellationToken);
+                }
+                catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
+                {
+                    return await ReadMineMinimalAsync(conn, sellerId, limit, cancellationToken);
+                }
+            }
         }
     }
 
@@ -153,9 +188,13 @@ public sealed class ListingRepository
         MySqlConnection conn,
         int sellerId,
         int limit,
+        bool includeItemCondition,
+        bool includeSpaceSuitability,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var conditionCol = includeItemCondition ? "l.item_condition,\n                " : "";
+        var spaceCol = includeSpaceSuitability ? "l.space_suitability,\n                " : "";
+        var sql = $"""
             SELECT
                 l.listing_id,
                 l.seller_id,
@@ -164,8 +203,8 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.gap_solution,
-                l.image_url,
+                {conditionCol}l.gap_solution,
+                {spaceCol}l.image_url,
                 l.status,
                 l.created_at,
                 u.display_name AS seller_display_name
@@ -185,7 +224,7 @@ public sealed class ListingRepository
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            list.Add(MapFeedRowWithGap(reader));
+            list.Add(MapFeedRowWithGap(reader, includeItemCondition, includeSpaceSuitability));
         }
 
         return list;
@@ -232,9 +271,26 @@ public sealed class ListingRepository
         return list;
     }
 
-    private static ListingFeedItemDto MapFeedRowWithGap(MySqlDataReader reader)
+    private static ListingFeedItemDto MapFeedRowWithGap(
+        MySqlDataReader reader,
+        bool includeItemCondition = true,
+        bool includeSpaceSuitability = false)
     {
         var ordGap = reader.GetOrdinal("gap_solution");
+        string? condition = null;
+        if (includeItemCondition)
+        {
+            var ordCond = reader.GetOrdinal("item_condition");
+            condition = reader.IsDBNull(ordCond) ? null : reader.GetString(ordCond);
+        }
+
+        string? spaceSuitability = null;
+        if (includeSpaceSuitability)
+        {
+            var ordSp = reader.GetOrdinal("space_suitability");
+            spaceSuitability = reader.IsDBNull(ordSp) ? null : reader.GetString(ordSp);
+        }
+
         return new ListingFeedItemDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
@@ -246,7 +302,9 @@ public sealed class ListingRepository
                 : reader.GetString(reader.GetOrdinal("description")),
             Price = reader.GetDecimal(reader.GetOrdinal("price")),
             Category = reader.IsDBNull(reader.GetOrdinal("category")) ? null : reader.GetString(reader.GetOrdinal("category")),
+            Condition = condition,
             GapSolution = reader.IsDBNull(ordGap) ? null : reader.GetString(ordGap),
+            SpaceSuitability = spaceSuitability,
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
@@ -267,7 +325,9 @@ public sealed class ListingRepository
                 : reader.GetString(reader.GetOrdinal("description")),
             Price = reader.GetDecimal(reader.GetOrdinal("price")),
             Category = reader.IsDBNull(reader.GetOrdinal("category")) ? null : reader.GetString(reader.GetOrdinal("category")),
+            Condition = null,
             GapSolution = null,
+            SpaceSuitability = null,
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
@@ -303,14 +363,21 @@ public sealed class ListingRepository
         }
         catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
         {
-            // Missing some fulfillment columns — still persist gap_solution (delivery / transfer method) + image when possible.
+            // Full insert needs all fulfillment columns. If any are missing, try tiers that still persist condition/dimensions.
             try
             {
-                await InsertListingRowMediumAsync(conn, sellerId, campusId, request, cancellationToken);
+                await InsertListingRowMediumWithConditionAsync(conn, sellerId, campusId, request, cancellationToken);
             }
-            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
+            catch (Exception ex1) when (AsMySqlException(ex1) is { } mx1 && IsUnknownColumnOrBadFieldError(mx1))
             {
-                await InsertListingRowMinimalAsync(conn, sellerId, campusId, request, cancellationToken);
+                try
+                {
+                    await InsertListingRowMediumAsync(conn, sellerId, campusId, request, cancellationToken);
+                }
+                catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
+                {
+                    await InsertListingRowMinimalAsync(conn, sellerId, campusId, request, cancellationToken);
+                }
             }
         }
 
@@ -350,12 +417,16 @@ public sealed class ListingRepository
         const string insertSql = """
             INSERT INTO listings (
                 campus_id, seller_id, title, description, price, category,
+                item_condition, dimensions,
                 gap_solution, storage_notes, pickup_start, pickup_end, pickup_location, delivery_notes,
+                space_suitability,
                 image_url, status
             )
             VALUES (
                 @campus_id, @seller_id, @title, @description, @price, @category,
+                @item_condition, @dimensions,
                 @gap_solution, @storage_notes, @pickup_start, @pickup_end, @pickup_location, @delivery_notes,
+                @space_suitability,
                 @image_url, 'active'
             );
             """;
@@ -367,12 +438,95 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
         cmd.Parameters.AddWithValue("@price", request.Price);
         cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+        cmd.Parameters.AddWithValue("@item_condition", string.IsNullOrWhiteSpace(request.Condition) ? DBNull.Value : request.Condition.Trim());
+        cmd.Parameters.AddWithValue("@dimensions", string.IsNullOrWhiteSpace(request.Dimensions) ? DBNull.Value : request.Dimensions.Trim());
         cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
         cmd.Parameters.AddWithValue("@storage_notes", string.IsNullOrWhiteSpace(request.StorageNotes) ? DBNull.Value : request.StorageNotes.Trim());
         cmd.Parameters.AddWithValue("@pickup_start", pickupStart.HasValue ? pickupStart.Value.Date : DBNull.Value);
         cmd.Parameters.AddWithValue("@pickup_end", pickupEnd.HasValue ? pickupEnd.Value.Date : DBNull.Value);
         cmd.Parameters.AddWithValue("@pickup_location", string.IsNullOrWhiteSpace(request.PickupLocation) ? DBNull.Value : request.PickupLocation.Trim());
         cmd.Parameters.AddWithValue("@delivery_notes", string.IsNullOrWhiteSpace(request.DeliveryNotes) ? DBNull.Value : request.DeliveryNotes.Trim());
+        cmd.Parameters.AddWithValue("@space_suitability", string.IsNullOrWhiteSpace(request.SpaceSuitability) ? DBNull.Value : request.SpaceSuitability.Trim());
+        cmd.Parameters.Add(
+            new MySqlParameter("@image_url", MySqlDbType.MediumText)
+            {
+                Value = string.IsNullOrWhiteSpace(request.ImageUrl) ? DBNull.Value : request.ImageUrl.Trim(),
+            });
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Like <see cref="InsertListingRowMediumAsync"/> but also persists <c>item_condition</c> (and <c>dimensions</c> when present)
+    /// when the full insert failed only because other columns (e.g. pickup dates) are missing.
+    /// </summary>
+    private static async Task InsertListingRowMediumWithConditionAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int campusId,
+        CreateListingRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await InsertListingRowMediumWithConditionCoreAsync(
+                conn, sellerId, campusId, request, includeDimensions: true, cancellationToken);
+        }
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
+        {
+            await InsertListingRowMediumWithConditionCoreAsync(
+                conn, sellerId, campusId, request, includeDimensions: false, cancellationToken);
+        }
+    }
+
+    private static async Task InsertListingRowMediumWithConditionCoreAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int campusId,
+        CreateListingRequest request,
+        bool includeDimensions,
+        CancellationToken cancellationToken)
+    {
+        var insertSql = includeDimensions
+            ? """
+                INSERT INTO listings (
+                    campus_id, seller_id, title, description, price, category,
+                    item_condition, dimensions,
+                    gap_solution, image_url, status
+                )
+                VALUES (
+                    @campus_id, @seller_id, @title, @description, @price, @category,
+                    @item_condition, @dimensions,
+                    @gap_solution, @image_url, 'active'
+                );
+                """
+            : """
+                INSERT INTO listings (
+                    campus_id, seller_id, title, description, price, category,
+                    item_condition,
+                    gap_solution, image_url, status
+                )
+                VALUES (
+                    @campus_id, @seller_id, @title, @description, @price, @category,
+                    @item_condition,
+                    @gap_solution, @image_url, 'active'
+                );
+                """;
+
+        await using var cmd = new MySqlCommand(insertSql, conn);
+        cmd.Parameters.AddWithValue("@campus_id", campusId);
+        cmd.Parameters.AddWithValue("@seller_id", sellerId);
+        cmd.Parameters.AddWithValue("@title", request.Title.Trim());
+        cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
+        cmd.Parameters.AddWithValue("@price", request.Price);
+        cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+        cmd.Parameters.AddWithValue("@item_condition", string.IsNullOrWhiteSpace(request.Condition) ? DBNull.Value : request.Condition.Trim());
+        if (includeDimensions)
+        {
+            cmd.Parameters.AddWithValue("@dimensions", string.IsNullOrWhiteSpace(request.Dimensions) ? DBNull.Value : request.Dimensions.Trim());
+        }
+
+        cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -505,11 +659,18 @@ public sealed class ListingRepository
         {
             try
             {
-                return await UpdateListingRowMediumAsync(conn, sellerId, listingId, request, cancellationToken);
+                return await UpdateListingRowMediumWithConditionAsync(conn, sellerId, listingId, request, cancellationToken);
             }
-            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
+            catch (Exception ex1) when (AsMySqlException(ex1) is { } mx1 && IsUnknownColumnOrBadFieldError(mx1))
             {
-                return await UpdateListingRowMinimalAsync(conn, sellerId, listingId, request, cancellationToken);
+                try
+                {
+                    return await UpdateListingRowMediumAsync(conn, sellerId, listingId, request, cancellationToken);
+                }
+                catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnOrBadFieldError(mx2))
+                {
+                    return await UpdateListingRowMinimalAsync(conn, sellerId, listingId, request, cancellationToken);
+                }
             }
         }
     }
@@ -529,12 +690,15 @@ public sealed class ListingRepository
                 description = @description,
                 price = @price,
                 category = @category,
+                item_condition = @item_condition,
+                dimensions = @dimensions,
                 gap_solution = @gap_solution,
                 storage_notes = @storage_notes,
                 pickup_start = @pickup_start,
                 pickup_end = @pickup_end,
                 pickup_location = @pickup_location,
                 delivery_notes = @delivery_notes,
+                space_suitability = @space_suitability,
                 image_url = @image_url
             WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
             """;
@@ -546,12 +710,94 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
         cmd.Parameters.AddWithValue("@price", request.Price);
         cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+        cmd.Parameters.AddWithValue("@item_condition", string.IsNullOrWhiteSpace(request.Condition) ? DBNull.Value : request.Condition.Trim());
+        cmd.Parameters.AddWithValue("@dimensions", string.IsNullOrWhiteSpace(request.Dimensions) ? DBNull.Value : request.Dimensions.Trim());
         cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
         cmd.Parameters.AddWithValue("@storage_notes", string.IsNullOrWhiteSpace(request.StorageNotes) ? DBNull.Value : request.StorageNotes.Trim());
         cmd.Parameters.AddWithValue("@pickup_start", pickupStart.HasValue ? pickupStart.Value.Date : DBNull.Value);
         cmd.Parameters.AddWithValue("@pickup_end", pickupEnd.HasValue ? pickupEnd.Value.Date : DBNull.Value);
         cmd.Parameters.AddWithValue("@pickup_location", string.IsNullOrWhiteSpace(request.PickupLocation) ? DBNull.Value : request.PickupLocation.Trim());
         cmd.Parameters.AddWithValue("@delivery_notes", string.IsNullOrWhiteSpace(request.DeliveryNotes) ? DBNull.Value : request.DeliveryNotes.Trim());
+        cmd.Parameters.AddWithValue("@space_suitability", string.IsNullOrWhiteSpace(request.SpaceSuitability) ? DBNull.Value : request.SpaceSuitability.Trim());
+        cmd.Parameters.Add(
+            new MySqlParameter("@image_url", MySqlDbType.MediumText)
+            {
+                Value = string.IsNullOrWhiteSpace(request.ImageUrl) ? DBNull.Value : request.ImageUrl.Trim(),
+            });
+
+        var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return n > 0;
+    }
+
+    /// <summary>
+    /// Like <see cref="UpdateListingRowMediumAsync"/> but also updates <c>item_condition</c> (and <c>dimensions</c> when present).
+    /// </summary>
+    private static async Task<bool> UpdateListingRowMediumWithConditionAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int listingId,
+        CreateListingRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await UpdateListingRowMediumWithConditionCoreAsync(
+                conn, sellerId, listingId, request, includeDimensions: true, cancellationToken);
+        }
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnOrBadFieldError(mx))
+        {
+            return await UpdateListingRowMediumWithConditionCoreAsync(
+                conn, sellerId, listingId, request, includeDimensions: false, cancellationToken);
+        }
+    }
+
+    private static async Task<bool> UpdateListingRowMediumWithConditionCoreAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int listingId,
+        CreateListingRequest request,
+        bool includeDimensions,
+        CancellationToken cancellationToken)
+    {
+        var sql = includeDimensions
+            ? """
+                UPDATE listings SET
+                    title = @title,
+                    description = @description,
+                    price = @price,
+                    category = @category,
+                    item_condition = @item_condition,
+                    dimensions = @dimensions,
+                    gap_solution = @gap_solution,
+                    image_url = @image_url
+                WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
+                """
+            : """
+                UPDATE listings SET
+                    title = @title,
+                    description = @description,
+                    price = @price,
+                    category = @category,
+                    item_condition = @item_condition,
+                    gap_solution = @gap_solution,
+                    image_url = @image_url
+                WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
+                """;
+
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@lid", listingId);
+        cmd.Parameters.AddWithValue("@sid", sellerId);
+        cmd.Parameters.AddWithValue("@title", request.Title.Trim());
+        cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
+        cmd.Parameters.AddWithValue("@price", request.Price);
+        cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+        cmd.Parameters.AddWithValue("@item_condition", string.IsNullOrWhiteSpace(request.Condition) ? DBNull.Value : request.Condition.Trim());
+        if (includeDimensions)
+        {
+            cmd.Parameters.AddWithValue("@dimensions", string.IsNullOrWhiteSpace(request.Dimensions) ? DBNull.Value : request.Dimensions.Trim());
+        }
+
+        cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -663,12 +909,15 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
+                l.item_condition,
+                l.dimensions,
                 l.gap_solution,
                 l.storage_notes,
                 l.pickup_start,
                 l.pickup_end,
                 l.pickup_location,
                 l.delivery_notes,
+                l.space_suitability,
                 l.image_url,
                 l.status,
                 l.created_at,
@@ -688,12 +937,15 @@ public sealed class ListingRepository
             return null;
         }
 
+        var ordCond = reader.GetOrdinal("item_condition");
+        var ordDim = reader.GetOrdinal("dimensions");
         var ordGap = reader.GetOrdinal("gap_solution");
         var ordStorage = reader.GetOrdinal("storage_notes");
         var ordPs = reader.GetOrdinal("pickup_start");
         var ordPe = reader.GetOrdinal("pickup_end");
         var ordPl = reader.GetOrdinal("pickup_location");
         var ordDel = reader.GetOrdinal("delivery_notes");
+        var ordSpace = reader.GetOrdinal("space_suitability");
 
         return new ListingDetailDto
         {
@@ -705,12 +957,15 @@ public sealed class ListingRepository
                 : reader.GetString(reader.GetOrdinal("description")),
             Price = reader.GetDecimal(reader.GetOrdinal("price")),
             Category = reader.IsDBNull(reader.GetOrdinal("category")) ? null : reader.GetString(reader.GetOrdinal("category")),
+            Condition = reader.IsDBNull(ordCond) ? null : reader.GetString(ordCond),
+            Dimensions = reader.IsDBNull(ordDim) ? null : reader.GetString(ordDim),
             GapSolution = reader.IsDBNull(ordGap) ? null : reader.GetString(ordGap),
             StorageNotes = reader.IsDBNull(ordStorage) ? null : reader.GetString(ordStorage),
             PickupStart = reader.IsDBNull(ordPs) ? null : reader.GetDateTime(ordPs),
             PickupEnd = reader.IsDBNull(ordPe) ? null : reader.GetDateTime(ordPe),
             PickupLocation = reader.IsDBNull(ordPl) ? null : reader.GetString(ordPl),
             DeliveryNotes = reader.IsDBNull(ordDel) ? null : reader.GetString(ordDel),
+            SpaceSuitability = reader.IsDBNull(ordSpace) ? null : reader.GetString(ordSpace),
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
@@ -760,12 +1015,15 @@ public sealed class ListingRepository
                 : reader.GetString(reader.GetOrdinal("description")),
             Price = reader.GetDecimal(reader.GetOrdinal("price")),
             Category = reader.IsDBNull(reader.GetOrdinal("category")) ? null : reader.GetString(reader.GetOrdinal("category")),
+            Condition = null,
+            Dimensions = null,
             GapSolution = null,
             StorageNotes = null,
             PickupStart = null,
             PickupEnd = null,
             PickupLocation = null,
             DeliveryNotes = null,
+            SpaceSuitability = null,
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),

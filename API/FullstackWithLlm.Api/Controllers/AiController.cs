@@ -17,15 +17,18 @@ public sealed class AiController : ControllerBase
     }
 
     /// <summary>
-    /// MVP: image → listing suggestions (stub for now; will be backed by hosted vision model).
-    /// Accepts multipart/form-data with field name "image".
+    /// Image → listing suggestion(s). Form field <c>image</c> required; <c>pile</c> true = multiple items in one photo.
     /// </summary>
     [AllowAnonymous]
     [HttpPost("listing-from-image")]
     [RequestSizeLimit(6_000_000)]
     [ProducesResponseType(typeof(AiListingSuggestionDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(AiPileListingsResponseDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<AiListingSuggestionDto>> ListingFromImage([FromForm] IFormFile? image, CancellationToken cancellationToken)
+    public async Task<ActionResult> ListingFromImage(
+        [FromForm] IFormFile? image,
+        [FromForm] string? pile,
+        CancellationToken cancellationToken)
     {
         if (image is null || image.Length <= 0)
         {
@@ -37,6 +40,8 @@ public sealed class AiController : ControllerBase
             return BadRequest("Image too large (max 6MB).");
         }
 
+        var pileMode = IsTruthyFormValue(pile);
+
         byte[] bytes;
         await using (var s = image.OpenReadStream())
         await using (var ms = new MemoryStream())
@@ -47,6 +52,12 @@ public sealed class AiController : ControllerBase
 
         try
         {
+            if (pileMode)
+            {
+                var listings = await _ai.SuggestPileAsync(bytes, cancellationToken);
+                return Ok(new AiPileListingsResponseDto { Listings = listings });
+            }
+
             var suggestion = await _ai.SuggestAsync(bytes, cancellationToken);
             return Ok(suggestion);
         }
@@ -55,5 +66,10 @@ public sealed class AiController : ControllerBase
             return StatusCode(ex.StatusCode, new { detail = ex.Message });
         }
     }
+
+    private static bool IsTruthyFormValue(string? v) =>
+        string.Equals(v, "true", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(v, "on", StringComparison.OrdinalIgnoreCase)
+        || v == "1";
 }
 

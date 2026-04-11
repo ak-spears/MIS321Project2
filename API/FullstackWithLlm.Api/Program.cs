@@ -105,8 +105,12 @@ app.UseExceptionHandler(errorApp =>
             if (mx.ErrorCode == MySqlErrorCode.BadFieldError || mx.Number == 1054)
             {
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                var devHint = mx.Message.Contains("default_gap_solution", StringComparison.OrdinalIgnoreCase)
+                    || mx.Message.Contains("preferred_receive_gap", StringComparison.OrdinalIgnoreCase)
+                    ? " For `users` gap columns: run database/alter_users_default_gap_solution.sql and database/alter_users_preferred_receive_gap.sql."
+                    : " Apply database scripts (e.g. database/alter_listings_fulfillment.sql, alter_listings_condition_dimensions.sql) so `listings` columns match the API.";
                 var detail = app.Environment.IsDevelopment()
-                    ? $"[{mx.ErrorCode}] {mx.Message} Apply database scripts (e.g. database/alter_listings_fulfillment.sql) so columns match the API, or rely on the API minimal listing insert path."
+                    ? $"[{mx.ErrorCode}] {mx.Message}{devHint}"
                     : "Database schema does not match the application.";
                 await context.Response.WriteAsJsonAsync(new
                 {

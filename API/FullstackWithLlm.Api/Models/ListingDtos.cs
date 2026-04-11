@@ -11,8 +11,12 @@ public sealed class ListingFeedItemDto
     public string? Description { get; init; }
     public decimal Price { get; init; }
     public string? Category { get; init; }
+    /// <summary>new | like_new | good | fair (<c>item_condition</c>); null if unknown or column missing.</summary>
+    public string? Condition { get; init; }
     /// <summary>Delivery/transfer (<c>gap_solution</c>): storage | pickup_window | ship_or_deliver; null if column missing in older DBs.</summary>
     public string? GapSolution { get; init; }
+    /// <summary><c>small_dorm</c> | <c>any_space</c> — null if column missing or unset.</summary>
+    public string? SpaceSuitability { get; init; }
     public string? ImageUrl { get; init; }
     public string Status { get; init; } = "";
     public string SellerDisplayName { get; init; } = "";
@@ -25,8 +29,13 @@ public sealed class CreateListingRequest
     public string? Description { get; set; }
     public decimal Price { get; set; }
     public string? Category { get; set; }
+    /// <summary>new | like_new | good | fair — stored as <c>item_condition</c>.</summary>
+    public string? Condition { get; set; }
+    public string? Dimensions { get; set; }
     /// <summary>Delivery/transfer method stored in <c>listings.gap_solution</c>: storage | pickup_window | ship_or_deliver.</summary>
     public string? GapSolution { get; set; }
+    /// <summary><c>small_dorm</c> | <c>any_space</c> — stored in <c>listings.space_suitability</c>.</summary>
+    public string? SpaceSuitability { get; set; }
     public string? StorageNotes { get; set; }
     /// <summary>ISO date yyyy-MM-dd or empty.</summary>
     public string? PickupStart { get; set; }
@@ -45,8 +54,12 @@ public sealed class ListingDetailDto
     public string? Description { get; init; }
     public decimal Price { get; init; }
     public string? Category { get; init; }
+    public string? Condition { get; init; }
+    public string? Dimensions { get; init; }
     /// <summary>Delivery/transfer method (<c>listings.gap_solution</c>).</summary>
     public string? GapSolution { get; init; }
+    /// <summary><c>small_dorm</c> | <c>any_space</c>.</summary>
+    public string? SpaceSuitability { get; init; }
     public string? StorageNotes { get; init; }
     public DateTime? PickupStart { get; init; }
     public DateTime? PickupEnd { get; init; }

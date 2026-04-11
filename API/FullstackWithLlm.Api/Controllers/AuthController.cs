@@ -94,6 +94,16 @@ public sealed class AuthController : ControllerBase
             return Conflict("An account with this email already exists.");
         }
 
+        string? defaultGap = null;
+        if (!string.IsNullOrWhiteSpace(request.DefaultGapSolution))
+        {
+            defaultGap = request.DefaultGapSolution.Trim().ToLowerInvariant();
+            if (defaultGap is not ("storage" or "pickup_window" or "ship_or_deliver"))
+            {
+                return BadRequest("defaultGapSolution must be storage, pickup_window, or ship_or_deliver.");
+            }
+        }
+
         var hash = BCrypt.Net.BCrypt.HashPassword(request.Password, workFactor: 12);
 
         var newId = await _users.TryCreateAsync(
@@ -104,7 +114,8 @@ public sealed class AuthController : ControllerBase
             moveDate,
             moveOutDate,
             dorm,
-            suite);
+            suite,
+            defaultGap);
 
         if (newId is null)
         {
