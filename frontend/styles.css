@@ -630,6 +630,686 @@ button.cdm-chip {
     font-size: 0.85rem;
 }
 
+/* ---------- Checkout (Apple-inspired calm layout, CDM-branded) ---------- */
+.cdm-checkout-shell {
+    background: #f5f5f7;
+    min-height: 100%;
+}
+
+/* Checkout header = same crimson bar + white wordmark as rest of CDM (beats cache / Bootstrap defaults). */
+.cdm-checkout-shell .cdm-checkout-topbar.cdm-topbar {
+    background: linear-gradient(90deg, var(--cdm-crimson), var(--cdm-crimson-dark)) !important;
+    color: #fff !important;
+}
+
+.cdm-checkout-shell .cdm-checkout-topbar .navbar-brand,
+.cdm-checkout-shell .cdm-checkout-topbar .navbar-brand span,
+.cdm-checkout-shell .cdm-checkout-topbar .nav-link {
+    color: #fff !important;
+}
+
+.cdm-checkout-shell .cdm-checkout-topbar .nav-link:hover {
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff !important;
+}
+
+.cdm-checkout-shell .body-content {
+    padding-top: 0;
+}
+
+.cdm-checkout-max {
+    max-width: 980px;
+}
+
+.cdm-checkout-back {
+    font-size: 0.9375rem;
+    color: #0066cc;
+    text-decoration: none;
+    font-weight: 400;
+    padding: 0;
+    border: 0;
+    background: none;
+}
+
+.cdm-checkout-back:hover {
+    text-decoration: underline;
+    color: #004499;
+}
+
+.cdm-checkout-hero-title {
+    font-size: clamp(1.75rem, 4vw, 2.25rem);
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    color: var(--cdm-ink);
+    line-height: 1.15;
+    margin: 0 0 0.35rem;
+}
+
+.cdm-checkout-hero-kicker {
+    font-size: 1.0625rem;
+    color: #6e6e73;
+    font-weight: 400;
+    line-height: 1.4;
+    max-width: 42rem;
+}
+
+.cdm-checkout-summary {
+    background: #fff;
+    border-radius: 18px;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+    padding: 1.25rem 1.35rem 1.5rem;
+}
+
+@media (min-width: 992px) {
+    .cdm-checkout-summary--sticky {
+        position: sticky;
+        top: 5.5rem;
+    }
+}
+
+.cdm-checkout-summary h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 1rem;
+    color: var(--cdm-ink);
+}
+
+.cdm-checkout-line {
+    border: 0;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    margin: 0.85rem 0;
+    opacity: 1;
+}
+
+.cdm-checkout-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.9375rem;
+}
+
+.cdm-checkout-row-label {
+    color: #6e6e73;
+    font-weight: 400;
+}
+
+.cdm-checkout-row-value {
+    font-weight: 500;
+    color: var(--cdm-ink);
+    text-align: right;
+}
+
+.cdm-checkout-thumb-wrap {
+    width: 72px;
+    height: 72px;
+    border-radius: 12px;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: #f5f5f7;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cdm-checkout-thumb-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.cdm-checkout-item-title {
+    font-weight: 500;
+    color: var(--cdm-ink);
+    letter-spacing: -0.01em;
+    line-height: 1.35;
+}
+
+.cdm-checkout-total {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--cdm-ink);
+}
+
+.cdm-checkout-panel {
+    background: #fff;
+    border-radius: 18px;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    padding: 1.35rem 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.cdm-checkout-panel h3 {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #6e6e73;
+    margin: 0 0 0.75rem;
+}
+
+.cdm-checkout-panel p {
+    font-size: 0.9375rem;
+    color: #424245;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.cdm-checkout-panel p + p {
+    margin-top: 0.65rem;
+}
+
+.cdm-checkout-cta {
+    width: 100%;
+    border-radius: 980px;
+    padding: 0.65rem 1.25rem;
+    font-size: 1.0625rem;
+    font-weight: 500;
+    border: none;
+    margin-top: 0.25rem;
+}
+
+.cdm-checkout-cta-secondary {
+    width: 100%;
+    border-radius: 980px;
+    padding: 0.55rem 1rem;
+    font-size: 1rem;
+    font-weight: 400;
+    background: transparent;
+    color: #0066cc;
+    border: none;
+    margin-top: 0.5rem;
+}
+
+.cdm-checkout-cta-secondary:hover {
+    text-decoration: underline;
+    color: #004499;
+}
+
+.cdm-checkout-footnote {
+    font-size: 0.75rem;
+    color: #86868b;
+    line-height: 1.45;
+    margin-top: 1rem;
+}
+
+.cdm-checkout-disclosure-btn {
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 0.65rem 0;
+    font-size: 0.9375rem;
+    color: #0066cc;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.cdm-checkout-disclosure-btn:hover {
+    color: #004499;
+}
+
+.cdm-checkout-disclosure-btn .cdm-chevron {
+    transition: transform 0.2s ease;
+    font-size: 0.75rem;
+    color: #86868b;
+}
+
+.cdm-checkout-disclosure-btn:not(.collapsed) .cdm-chevron {
+    transform: rotate(180deg);
+}
+
+.cdm-checkout-disclosure-body {
+    font-size: 0.8125rem;
+    color: #6e6e73;
+    line-height: 1.5;
+    padding-bottom: 0.5rem;
+}
+
+.cdm-checkout-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #1d7c4a;
+    background: rgba(29, 124, 74, 0.1);
+    border-radius: 980px;
+    padding: 0.25rem 0.65rem;
+    margin-bottom: 0.75rem;
+}
+
+.cdm-checkout-badge--warm {
+    color: #9e1b32;
+    background: rgba(158, 27, 50, 0.08);
+}
+
+.cdm-chat-placeholder {
+    border-radius: 12px;
+    border: 1px dashed rgba(0, 0, 0, 0.12);
+    background: #fafafa;
+    padding: 0.85rem 1rem;
+    font-size: 0.875rem;
+    color: #86868b;
+    margin-top: 0.75rem;
+}
+
+.cdm-checkout-mission {
+    background: rgba(158, 27, 50, 0.06);
+    border: 1px solid rgba(158, 27, 50, 0.14);
+    border-radius: 16px;
+    padding: 1rem 1.25rem;
+    font-size: 0.9375rem;
+    color: #3a3a3c;
+    line-height: 1.55;
+}
+
+.cdm-checkout-steps {
+    margin: 0;
+    padding-left: 1.15rem;
+    font-size: 0.9375rem;
+    color: #424245;
+    line-height: 1.55;
+}
+
+.cdm-checkout-steps li + li {
+    margin-top: 0.5rem;
+}
+
+.cdm-checkout-safety {
+    font-size: 0.875rem;
+    color: #6e6e73;
+    line-height: 1.45;
+    margin: 0.85rem 0 0;
+    padding-left: 1.1rem;
+}
+
+.cdm-checkout-safety li + li {
+    margin-top: 0.35rem;
+}
+
+.cdm-checkout-progress {
+    display: flex;
+    align-items: flex-start;
+    width: 100%;
+    max-width: 400px;
+}
+
+.cdm-checkout-progress-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 3.75rem;
+    flex-shrink: 0;
+}
+
+.cdm-checkout-progress-dot {
+    display: block;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid #d2d2d7;
+    background: #fff;
+    box-sizing: content-box;
+}
+
+.cdm-checkout-progress-dot.is-active,
+.cdm-checkout-progress-dot.is-complete {
+    border-color: var(--cdm-crimson);
+    background: var(--cdm-crimson);
+}
+
+.cdm-checkout-progress-dot.is-upcoming {
+    background: #fff;
+}
+
+.cdm-checkout-progress-dot.is-next {
+    border-color: var(--cdm-crimson);
+    background: rgba(158, 27, 50, 0.2);
+    box-shadow: 0 0 0 3px rgba(158, 27, 50, 0.12);
+}
+
+.cdm-checkout-progress-label {
+    margin-top: 0.35rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: #86868b;
+    line-height: 1.2;
+    text-align: center;
+}
+
+.cdm-checkout-progress-connector {
+    height: 2px;
+    margin-top: 6px;
+    flex: 1 1 auto;
+    min-width: 6px;
+    background: #e5e5ea;
+    border-radius: 2px;
+}
+
+.cdm-checkout-progress-connector.is-complete {
+    background: var(--cdm-crimson);
+}
+
+.cdm-checkout-payment {
+    background: rgba(0, 102, 204, 0.06);
+    border: 1px solid rgba(0, 102, 204, 0.15);
+    font-size: 0.9rem;
+    line-height: 1.45;
+    color: #1d1d1f;
+}
+
+.cdm-checkout-urgency {
+    border-radius: 12px;
+    border: 1px solid rgba(234, 179, 8, 0.45);
+}
+
+.cdm-checkout-success-card {
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 20px;
+    padding: 2rem 1.5rem 1.75rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.06);
+}
+
+.cdm-checkout-success-icon {
+    width: 4rem;
+    height: 4rem;
+    border-radius: 50%;
+    background: var(--cdm-crimson);
+    color: #fff;
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 4rem;
+    text-align: center;
+}
+
+/* ---------- My transactions ---------- */
+.cdm-tx-stats {
+    align-items: center;
+}
+
+.cdm-tx-stat-pill {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.35rem 0.75rem;
+    border-radius: 980px;
+    background: rgba(0, 0, 0, 0.05);
+    color: #424245;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cdm-tx-empty {
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 20px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+}
+
+.cdm-tx-empty-icon {
+    font-size: 2.5rem;
+    line-height: 1;
+    filter: grayscale(0.2);
+    opacity: 0.9;
+}
+
+.cdm-tx-card {
+    background: #fff;
+    border-radius: 18px;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+    padding: 1.25rem 1.35rem;
+}
+
+.cdm-tx-card-title {
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--cdm-ink);
+}
+
+.cdm-tx-meta {
+    font-size: 0.8125rem;
+    color: #86868b;
+}
+
+.cdm-tx-ref {
+    color: #aeaeb2;
+    margin-top: 0.15rem;
+}
+
+.cdm-tx-kind {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.3rem 0.65rem;
+    border-radius: 980px;
+    border: 1px solid transparent;
+}
+
+.cdm-tx-kind--sale {
+    color: var(--cdm-crimson);
+    background: rgba(158, 27, 50, 0.1);
+    border-color: rgba(158, 27, 50, 0.2);
+}
+
+.cdm-tx-kind--claim {
+    color: #1d7c4a;
+    background: rgba(29, 124, 74, 0.1);
+    border-color: rgba(29, 124, 74, 0.2);
+}
+
+.cdm-tx-status {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.3rem 0.65rem;
+    border-radius: 980px;
+    background: rgba(255, 193, 7, 0.15);
+    color: #946200;
+    border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
+.cdm-tx-status--done {
+    background: rgba(29, 124, 74, 0.12);
+    color: #1d7c4a;
+    border-color: rgba(29, 124, 74, 0.28);
+}
+
+.cdm-tx-fee-grid {
+    font-size: 0.875rem;
+    color: #424245;
+}
+
+.cdm-tx-fee-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cdm-tx-fee-row:last-child {
+    border-bottom: 0;
+}
+
+.cdm-tx-fee-row--strong {
+    font-weight: 600;
+    color: var(--cdm-ink);
+    padding-top: 0.5rem;
+    margin-top: 0.15rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    border-bottom: 0;
+}
+
+.cdm-tx-actions {
+    border-top: 1px solid rgba(0, 0, 0, 0.06) !important;
+}
+
+.cdm-tx-eyebrow {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #86868b;
+}
+
+.cdm-tx-demo-note {
+    color: #aeaeb2;
+}
+
+.cdm-tx-quicknav .btn {
+    font-size: 0.8125rem;
+    font-weight: 500;
+}
+
+.cdm-tx-alert {
+    background: linear-gradient(135deg, rgba(255, 193, 7, 0.14), rgba(158, 27, 50, 0.08));
+    border: 1px solid rgba(234, 179, 8, 0.35);
+    border-radius: 16px;
+    padding: 1rem 1.15rem;
+}
+
+.cdm-tx-alert-title {
+    font-weight: 700;
+    font-size: 0.9375rem;
+    color: var(--cdm-ink);
+    margin-bottom: 0.35rem;
+}
+
+.cdm-tx-alert-body {
+    font-size: 0.875rem;
+    line-height: 1.45;
+    color: #424245;
+}
+
+.cdm-tx-stat-pill--pulse {
+    border-color: rgba(158, 27, 50, 0.35) !important;
+    background: rgba(158, 27, 50, 0.08) !important;
+    color: var(--cdm-crimson) !important;
+}
+
+.cdm-tx-filters {
+    align-items: center;
+}
+
+.cdm-tx-filter-pill {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.4rem 0.95rem;
+    border-radius: 980px;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: #fff;
+    color: #424245;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.cdm-tx-filter-pill:hover {
+    border-color: rgba(158, 27, 50, 0.35);
+    background: rgba(158, 27, 50, 0.04);
+}
+
+.cdm-tx-filter-pill.is-active {
+    background: var(--cdm-crimson);
+    border-color: var(--cdm-crimson);
+    color: #fff;
+}
+
+.cdm-tx-filter-pill.is-active:hover {
+    background: var(--cdm-crimson-dark);
+    border-color: var(--cdm-crimson-dark);
+    color: #fff;
+}
+
+.cdm-tx-tip {
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 16px;
+    padding: 1rem 1.15rem;
+    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.04);
+}
+
+.cdm-tx-tip-title {
+    font-size: 0.8125rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #6e6e73;
+    margin-bottom: 0.35rem;
+}
+
+.cdm-tx-tip-body {
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: #3a3a3c;
+}
+
+.cdm-tx-card-statusline {
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--cdm-ink);
+    line-height: 1.3;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cdm-tx-thumb {
+    width: 3.25rem;
+    height: 3.25rem;
+    border-radius: 14px;
+    background: linear-gradient(145deg, #f5f5f7, #e8e8ed);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    flex-shrink: 0;
+}
+
+.cdm-tx-rel {
+    font-weight: 600;
+    color: var(--cdm-crimson);
+}
+
+.cdm-tx-total-pill {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: -0.02em;
+    color: var(--cdm-ink);
+}
+
+.cdm-tx-total-sub {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #86868b;
+}
+
+.cdm-tx-total-pill--free {
+    color: #1d7c4a;
+}
+
+.cdm-tx-footnote {
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: #86868b;
+}
+
+.cdm-tx-filter-empty {
+    background: #fff;
+    border: 1px dashed rgba(0, 0, 0, 0.12);
+    border-radius: 18px;
+}
+
 /* Listing detail — eBay-style gallery + buy box */
 .cdm-listing-gallery {
     background: #fff;

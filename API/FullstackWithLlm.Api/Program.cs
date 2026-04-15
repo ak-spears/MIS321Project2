@@ -20,10 +20,13 @@ LocalDevConnectionStringFix.Apply(builder);
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
     o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    // POST bodies from the SPA use camelCase; bind even if casing drifts.
+    o.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
 });
 builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();
 builder.Services.AddScoped<ListingRepository>();
+builder.Services.AddScoped<TransactionRepository>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton<AiListingFromImageService>();
 builder.Services.AddHttpClient<AiListingDescriptionService>();
@@ -64,14 +67,25 @@ builder.Services.AddCors(options =>
             // Your browser sends `Origin: null` when `index.html` is opened directly (file://...).
             // Accept that in dev so fetch() and preflights succeed.
             .SetIsOriginAllowed(origin =>
-                string.IsNullOrWhiteSpace(origin) ||
-                origin.Equals("null", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://127.0.0.1:5500", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://127.0.0.1:5147", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5147", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://127.0.0.1:5148", StringComparison.OrdinalIgnoreCase) ||
-                origin.Equals("http://localhost:5148", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(origin) || origin.Equals("null", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (Uri.TryCreate(origin, UriKind.Absolute, out var u) &&
+                    u.Host.EndsWith(".herokuapp.com", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                return origin.Equals("http://127.0.0.1:5500", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://127.0.0.1:5147", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://localhost:5147", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://127.0.0.1:5148", StringComparison.OrdinalIgnoreCase) ||
+                       origin.Equals("http://localhost:5148", StringComparison.OrdinalIgnoreCase);
+            })
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -161,15 +175,13 @@ app.UseExceptionHandler(errorApp =>
 
 app.UseCors("Frontend");
 
-if (app.Environment.IsDevelopment())
+// Serve `frontend/` (repo root) in dev and on Heroku so one dyno hosts SPA + API. Same-origin → empty API_BASE in app.js.
+var frontendPath = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend"));
+if (Directory.Exists(frontendPath))
 {
-    var frontendPath = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend"));
-    if (Directory.Exists(frontendPath))
-    {
-        var files = new PhysicalFileProvider(frontendPath);
-        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-        app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
-    }
+    var files = new PhysicalFileProvider(frontendPath);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 }
 
 app.UseAuthentication();

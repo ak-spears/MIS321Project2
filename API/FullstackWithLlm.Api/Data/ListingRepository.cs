@@ -83,7 +83,7 @@ public sealed class ListingRepository
                 {spaceCol}l.image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.status = 'active'
@@ -124,10 +124,10 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.image_url,
+                CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.status = 'active'
@@ -207,7 +207,7 @@ public sealed class ListingRepository
                 {spaceCol}l.image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.seller_id = @seller_id
@@ -245,10 +245,10 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.image_url,
+                CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.seller_id = @seller_id
@@ -609,6 +609,36 @@ public sealed class ListingRepository
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>Core columns only — for schemas with no <c>image_url</c> column.</summary>
+    private static async Task InsertListingRowBareAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int campusId,
+        CreateListingRequest request,
+        CancellationToken cancellationToken)
+    {
+        const string insertSql = """
+            INSERT INTO listings (
+                campus_id, seller_id, title, description, price, category,
+                status
+            )
+            VALUES (
+                @campus_id, @seller_id, @title, @description, @price, @category,
+                'active'
+            );
+            """;
+
+        await using var cmd = new MySqlCommand(insertSql, conn);
+        cmd.Parameters.AddWithValue("@campus_id", campusId);
+        cmd.Parameters.AddWithValue("@seller_id", sellerId);
+        cmd.Parameters.AddWithValue("@title", request.Title.Trim());
+        cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
+        cmd.Parameters.AddWithValue("@price", request.Price);
+        cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static DateTime? ParseOptionalDate(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
@@ -878,6 +908,34 @@ public sealed class ListingRepository
         return n > 0;
     }
 
+    private static async Task<bool> UpdateListingRowBareAsync(
+        MySqlConnection conn,
+        int sellerId,
+        int listingId,
+        CreateListingRequest request,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            UPDATE listings SET
+                title = @title,
+                description = @description,
+                price = @price,
+                category = @category
+            WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
+            """;
+
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@lid", listingId);
+        cmd.Parameters.AddWithValue("@sid", sellerId);
+        cmd.Parameters.AddWithValue("@title", request.Title.Trim());
+        cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
+        cmd.Parameters.AddWithValue("@price", request.Price);
+        cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+
+        var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return n > 0;
+    }
+
     public async Task<ListingDetailDto?> GetByIdAsync(int listingId, CancellationToken cancellationToken = default)
     {
         await using var conn = new MySqlConnection(_connectionString);
@@ -921,7 +979,7 @@ public sealed class ListingRepository
                 l.image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.listing_id = @id
@@ -986,10 +1044,10 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
-                l.image_url,
+                CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
-                u.display_name AS seller_display_name
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.listing_id = @id
