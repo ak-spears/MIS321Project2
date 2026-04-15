@@ -141,6 +141,8 @@ function setStoredToken(token) {
 const LISTINGS_STORAGE_KEY = "cdm_my_listings_v1";
 /** Local-only checkout / claim history until API persists transactions. */
 const TRANSACTIONS_STORAGE_KEY = "cdm_transactions_v1";
+/** Local-only buyer/seller conversations (per browser, any account used on this device). */
+const MESSAGES_STORAGE_KEY = "cdm_messages_v1";
 
 /** On paid listings, Bama Marketplace collects a 7% marketplace fee from sale proceeds (buyer pays list price only). */
 const PLATFORM_FEE_RATE = 0.07;
@@ -151,7 +153,7 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
+    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations' | 'messages'} */
     view: "home",
     /** `GET /api/listings/{id}` when viewing own donation detail (read-only + QR). */
     donationDetailListingId: /** @type {number | null} */ (null),
@@ -160,9 +162,11 @@ const state = {
     listingKey: null,
     sellerProfileUserId: /** @type {number | null} */ (null),
     /**
-     * @type {null | { type: 'navigate', view: 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'profile' } | { type: 'donation-detail', listingId: number } | { type: 'buy', listingKey: string }}
+     * @type {null | { type: 'navigate', view: 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'profile' | 'messages' } | { type: 'donation-detail', listingId: number } | { type: 'buy', listingKey: string }}
      */
     afterLoginIntent: null,
+    /** Messages view: selected conversation id. */
+    messagesActiveConversationId: /** @type {string | null} */ (null),
     /** Saved/starred listing keys (browser only). */
     savedListingKeys: getSavedListingKeys(),
     /** Home feed: listing key → image URL (set in JS after fetch; avoids huge src in innerHTML). */
@@ -1028,6 +1032,25 @@ function wireFeedCardButtons(root) {
             toggleSavedListingKey(key);
         });
     });
+    root.querySelectorAll("[data-action='message-seller']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const listingKey = btn.getAttribute("data-listing-key") ?? "";
+            const listingTitle = btn.getAttribute("data-listing-title") ?? "Listing";
+            const sellerIdRaw = btn.getAttribute("data-seller-id");
+            const sellerName = btn.getAttribute("data-seller-name") ?? "Seller";
+            const sellerUserId = Number(sellerIdRaw);
+            if (!Number.isFinite(sellerUserId) || sellerUserId <= 0) {
+                alert("Seller messaging is unavailable for this listing.");
+                return;
+            }
+            openMessagesForListing({
+                listingKey,
+                listingTitle,
+                sellerUserId,
+                sellerLabel: sellerName,
+            });
+        });
+    });
 }
 
 function syncFeedFilterSummaries() {
@@ -1337,7 +1360,8 @@ function navigate(view) {
             view === "donate-post" ||
             view === "my-listings" ||
             view === "my-donations" ||
-            view === "profile") &&
+            view === "profile" ||
+            view === "messages") &&
         !isAuthed()
     ) {
         requireAuth({ type: "navigate", view });
@@ -1386,6 +1410,11 @@ function navigateTransactions() {
     render();
 }
 
+function navigateMessages() {
+    state.view = "messages";
+    render();
+}
+
 function isAuthed() {
     return Boolean(state.token);
 }
@@ -1426,6 +1455,110 @@ function parseJwtSub(token) {
     } catch {
         return null;
     }
+}
+
+/**
+ * @typedef {{
+ *   senderUserId: number,
+ *   senderLabel: string,
+ *   text: string,
+ *   createdAt: string
+ * }} MessageEntry
+ */
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   listingKey: string,
+ *   listingTitle: string,
+ *   sellerUserId: number,
+ *   sellerLabel: string,
+ *   buyerUserId: number,
+ *   buyerLabel: string,
+ *   updatedAt: string,
+ *   messages: MessageEntry[]
+ * }} MessageConversation
+ */
+
+/** @returns {MessageConversation[]} */
+function getStoredConversations() {
+    try {
+        const raw = localStorage.getItem(MESSAGES_STORAGE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+/** @param {MessageConversation[]} rows */
+function setStoredConversations(rows) {
+    localStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(rows));
+}
+
+/**
+ * Ensure a buyer<->seller thread exists for a listing and return it.
+ * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
+ * @returns {MessageConversation | null}
+ */
+function ensureConversationForListing(payload) {
+    const buyerUserId = parseJwtSub(state.token);
+    if (buyerUserId == null) return null;
+    if (!Number.isFinite(payload.sellerUserId) || payload.sellerUserId <= 0) return null;
+    if (buyerUserId === payload.sellerUserId) return null;
+    const buyerLabel = state.authEmail || `User #${buyerUserId}`;
+    const listingKey = String(payload.listingKey || "").trim();
+    if (!listingKey) return null;
+
+    const rows = getStoredConversations();
+    const existing = rows.find(
+        (row) =>
+            String(row.listingKey) === listingKey &&
+            Number(row.buyerUserId) === buyerUserId &&
+            Number(row.sellerUserId) === Number(payload.sellerUserId),
+    );
+    if (existing) {
+        if (!existing.buyerLabel && buyerLabel) existing.buyerLabel = buyerLabel;
+        if (!existing.sellerLabel && payload.sellerLabel) existing.sellerLabel = payload.sellerLabel;
+        if (!existing.listingTitle && payload.listingTitle) existing.listingTitle = payload.listingTitle;
+        setStoredConversations(rows);
+        return existing;
+    }
+
+    const nowIso = new Date().toISOString();
+    const created = {
+        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        listingKey,
+        listingTitle: String(payload.listingTitle || "Listing"),
+        sellerUserId: Number(payload.sellerUserId),
+        sellerLabel: String(payload.sellerLabel || `User #${payload.sellerUserId}`),
+        buyerUserId,
+        buyerLabel,
+        updatedAt: nowIso,
+        messages: [],
+    };
+    rows.push(created);
+    setStoredConversations(rows);
+    return created;
+}
+
+/**
+ * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
+ */
+function openMessagesForListing(payload) {
+    if (!isAuthed()) {
+        state.afterLoginIntent = { type: "navigate", view: "messages" };
+        navigateAuth("login");
+        return;
+    }
+    const conv = ensureConversationForListing(payload);
+    if (!conv) {
+        alert("Could not open messages for this listing.");
+        return;
+    }
+    state.messagesActiveConversationId = conv.id;
+    navigateMessages();
 }
 
 async function apiJson(path, options) {
@@ -1716,7 +1849,7 @@ function openDonationDetail(listingId) {
 
 /**
  * Primary top bar: Home, Help, Contact, DONATIONS (DONATIONS emphasized in CSS).
- * @param {null | 'go-home' | 'nav-help' | 'nav-contact' | 'nav-donations'} active — `data-action` of current page for aria-current.
+ * @param {null | 'go-home' | 'nav-help' | 'nav-contact' | 'nav-donations' | 'nav-messages'} active — `data-action` of current page for aria-current.
  */
 function topNavPrimaryLinksHtml(active) {
     const li = (action, label, extraClass = "") => {
@@ -1729,7 +1862,8 @@ function topNavPrimaryLinksHtml(active) {
                             ${li("go-home", "Home")}
                             ${li("nav-help", "Help")}
                             ${li("nav-contact", "Contact")}
-                            ${li("nav-donations", "DONATIONS", "cdm-nav-donations")}
+                            ${li("nav-donations", "Donations")}
+                            ${li("nav-messages", "Messages")}
                         </ul>`;
 }
 
@@ -1744,6 +1878,7 @@ function wireNav(root) {
         ["nav-help", "help"],
         ["nav-contact", "contact"],
         ["nav-donations", "donations"],
+        ["nav-messages", "messages"],
     ])) {
         root.querySelectorAll(`[data-action='${action}']`).forEach((el) => {
             el.addEventListener("click", (e) => {
@@ -1932,6 +2067,25 @@ function wireTradeActions(root) {
             const key = btn.getAttribute("data-listing-key");
             if (!key) return;
             toggleSavedListingKey(key);
+        });
+    });
+    root.querySelectorAll("[data-action='message-seller']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const listingKey = btn.getAttribute("data-listing-key") ?? "";
+            const listingTitle = btn.getAttribute("data-listing-title") ?? "Listing";
+            const sellerIdRaw = btn.getAttribute("data-seller-id");
+            const sellerName = btn.getAttribute("data-seller-name") ?? "Seller";
+            const sellerUserId = Number(sellerIdRaw);
+            if (!Number.isFinite(sellerUserId) || sellerUserId <= 0) {
+                alert("Seller messaging is unavailable for this listing.");
+                return;
+            }
+            openMessagesForListing({
+                listingKey,
+                listingTitle,
+                sellerUserId,
+                sellerLabel: sellerName,
+            });
         });
     });
 }
@@ -5723,7 +5877,16 @@ function renderListingDbFromApi(L) {
         myUid != null && sellerNumeric != null && Number(sellerNumeric) === myUid;
     const primaryCtaHtml = isOwnListing
         ? `<p class="small text-muted border rounded px-3 py-2 mb-0 mt-3">This is your listing — it isn’t shown on your home feed to buyers. Edit it from <strong>My listings</strong>.</p>`
-        : `<button class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-3" type="button" data-action="buy-item" data-listing-key="db:${escapeHtml(String(L.listingId))}">Claim / Buy</button>`;
+        : `<button class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-3" type="button" data-action="buy-item" data-listing-key="db:${escapeHtml(String(L.listingId))}">Claim / Buy</button>
+           <button
+             class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-2"
+             type="button"
+             data-action="message-seller"
+             data-listing-key="db:${escapeHtml(String(L.listingId))}"
+             data-listing-title="${escapeAttrForDoubleQuoted(String(L.title || "Listing"))}"
+             data-seller-id="${escapeAttrForDoubleQuoted(String(Number.isFinite(sellerId) ? sellerId : ""))}"
+             data-seller-name="${escapeAttrForDoubleQuoted(String(L.sellerDisplayName || "Seller"))}"
+           >Message seller</button>`;
 
     const footNoteHtml = isOwnListing
         ? `<p class="small text-muted border-top pt-3 mt-3 mb-0">Share the link or wait for buyers to find this on the public feed.</p>`
@@ -5778,6 +5941,7 @@ function renderListingDbFromApi(L) {
         gapSolution: L.gapSolution ?? L.GapSolution ?? null,
         pickupStart: pickupStartIso,
         pickupEnd: pickupEndIso,
+        sellerUserId: Number.isFinite(sellerId) ? sellerId : null,
     };
 
     const shell = el(`
@@ -7144,6 +7308,148 @@ function renderTransactionsMounted(rows, opts) {
     ensureAuthUi();
 }
 
+function renderMessages() {
+    const root = document.getElementById("app");
+    const myUserId = parseJwtSub(state.token);
+    if (myUserId == null) {
+        root.innerHTML = "";
+        navigateAuth("login");
+        return;
+    }
+    const all = getStoredConversations();
+    const mine = all
+        .filter((row) => Number(row.buyerUserId) === myUserId || Number(row.sellerUserId) === myUserId)
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    const chosenId =
+        mine.some((row) => row.id === state.messagesActiveConversationId) ? state.messagesActiveConversationId : mine[0]?.id || null;
+    state.messagesActiveConversationId = chosenId;
+    const active = mine.find((row) => row.id === chosenId) || null;
+
+    const listHtml = mine.length
+        ? mine
+              .map((row) => {
+                  const otherLabel =
+                      Number(row.sellerUserId) === myUserId ? row.buyerLabel || `User #${row.buyerUserId}` : row.sellerLabel || `User #${row.sellerUserId}`;
+                  const isActive = active && active.id === row.id;
+                  const last = row.messages && row.messages.length ? row.messages[row.messages.length - 1] : null;
+                  const preview = last ? escapeHtml(String(last.text || "").slice(0, 68)) : "No messages yet";
+                  return `<button type="button" class="list-group-item list-group-item-action ${isActive ? "active" : ""}" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}">
+                        <div class="fw-semibold">${escapeHtml(otherLabel)}</div>
+                        <div class="small ${isActive ? "text-white-50" : "text-muted"}">${escapeHtml(row.listingTitle || "Listing")}</div>
+                        <div class="small ${isActive ? "text-white-50" : "text-muted"} text-truncate">${preview}</div>
+                    </button>`;
+              })
+              .join("")
+        : `<div class="cdm-card p-4 cdm-muted small">No conversations yet. Open a listing and tap <strong>Message seller</strong> to start.</div>`;
+
+    const messagesHtml = active
+        ? active.messages.length
+            ? active.messages
+                  .map((m) => {
+                      const mineMsg = Number(m.senderUserId) === myUserId;
+                      return `<div class="d-flex ${mineMsg ? "justify-content-end" : "justify-content-start"} mb-2">
+                            <div class="px-3 py-2 rounded-3 ${mineMsg ? "bg-dark text-white" : "bg-light border"}" style="max-width: 78%;">
+                                <div class="small ${mineMsg ? "text-white-50" : "text-muted"} mb-1">${escapeHtml(m.senderLabel || "User")}</div>
+                                <div>${escapeHtml(m.text || "")}</div>
+                            </div>
+                        </div>`;
+                  })
+                  .join("")
+            : `<div class="cdm-card p-3 cdm-muted small">No messages yet. Say hello and coordinate pickup details.</div>`
+        : `<div class="cdm-card p-4 cdm-muted small">Select a conversation to view messages.</div>`;
+    const otherLabel = active
+        ? Number(active.sellerUserId) === myUserId
+            ? active.buyerLabel || `User #${active.buyerUserId}`
+            : active.sellerLabel || `User #${active.sellerUserId}`
+        : "Conversation";
+
+    root.innerHTML = "";
+    const shell = el(`
+        <div class="cdm-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
+                    </a>
+                    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavMessages" aria-controls="cdmNavMessages" aria-expanded="false" aria-label="Toggle navigation">
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="cdmNavMessages">
+                        ${topNavPrimaryLinksHtml("nav-messages")}
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                            <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+            <div class="body-content cdm-body-content">
+                <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                        <div>
+                            <h1 class="h3 cdm-title mb-1">Messages</h1>
+                            <p class="cdm-muted small mb-0">Current and past conversations with buyers and sellers.</p>
+                        </div>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-12 col-lg-4">
+                            <div class="list-group">${listHtml}</div>
+                        </div>
+                        <div class="col-12 col-lg-8">
+                            <div class="cdm-card p-3">
+                                <div class="fw-semibold mb-2">${escapeHtml(otherLabel)}</div>
+                                <div class="border rounded-3 p-3 mb-3" style="min-height: 280px; max-height: 420px; overflow-y: auto;">
+                                    ${messagesHtml}
+                                </div>
+                                <form id="messages-form" class="d-flex gap-2">
+                                    <input id="messages-input" class="form-control" type="text" maxlength="600" placeholder="Write a message…" ${active ? "" : "disabled"} />
+                                    <button class="btn cdm-btn-crimson" type="submit" ${active ? "" : "disabled"}>Send</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+
+    shell.querySelectorAll("[data-action='open-message-thread']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const id = btn.getAttribute("data-conversation-id");
+            if (!id) return;
+            state.messagesActiveConversationId = id;
+            renderMessages();
+        });
+    });
+    const form = shell.querySelector("#messages-form");
+    const input = shell.querySelector("#messages-input");
+    form?.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (!(input instanceof HTMLInputElement)) return;
+        const text = input.value.trim();
+        if (!text) return;
+        const me = parseJwtSub(state.token);
+        if (me == null || !state.messagesActiveConversationId) return;
+        const rows = getStoredConversations();
+        const target = rows.find((row) => row.id === state.messagesActiveConversationId);
+        if (!target) return;
+        target.messages = Array.isArray(target.messages) ? target.messages : [];
+        target.messages.push({
+            senderUserId: me,
+            senderLabel: state.authEmail || `User #${me}`,
+            text,
+            createdAt: new Date().toISOString(),
+        });
+        target.updatedAt = new Date().toISOString();
+        setStoredConversations(rows);
+        input.value = "";
+        renderMessages();
+    });
+}
+
 function render() {
     if (state.view === "auth") {
         renderAuth();
@@ -7175,6 +7481,8 @@ function render() {
         renderTransactions();
     } else if (state.view === "profile") {
         void renderProfile();
+    } else if (state.view === "messages") {
+        renderMessages();
     } else if (state.view === "help" || state.view === "contact" || state.view === "donations") {
         renderStaticSitePage();
     } else if (state.view === "about") {
