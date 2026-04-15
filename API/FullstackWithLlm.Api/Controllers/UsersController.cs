@@ -104,13 +104,40 @@ public sealed class UsersController : ControllerBase
             return Unauthorized();
         }
 
-        var updated = await _users.UpdateProfileAsync(userId, request, cancellationToken);
+        bool updated;
+        try
+        {
+            updated = await _users.UpdateProfileAsync(userId, request, cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
         if (!updated)
         {
             return NotFound();
         }
 
         var profile = await _users.GetProfileByIdAsync(userId, cancellationToken);
+        if (profile is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(profile);
+    }
+
+    [HttpGet("{id:int}/public")]
+    [ProducesResponseType(typeof(PublicUserProfileDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<PublicUserProfileDto>> GetPublicProfile(int id, CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return NotFound();
+        }
+
+        var profile = await _users.GetPublicProfileByIdAsync(id, cancellationToken);
         if (profile is null)
         {
             return NotFound();

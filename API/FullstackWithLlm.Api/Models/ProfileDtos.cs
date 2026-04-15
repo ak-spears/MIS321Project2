@@ -38,3 +38,14 @@ public sealed class UpdateUserProfileRequest
     public string? PreferredReceiveGap { get; set; }
 }
 
+public sealed class PublicUserProfileDto
+{
+    public int UserId { get; init; }
+    public int CampusId { get; init; }
+    public string DisplayName { get; init; } = "";
+    public bool LivesOnCampus { get; init; }
+    public string? DormBuilding { get; init; }
+    public string? SuiteLetter { get; init; }
+    public string? AvatarUrl { get; init; }
+}
+

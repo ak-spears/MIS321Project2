@@ -1,4 +1,4 @@
-/* Campus Dorm Marketplace styles go here. */
+/* Bama Marketplace styles go here. */
 
 :root {
     --cdm-crimson: #9e1b32;
@@ -45,6 +45,13 @@ body {
 .cdm-topbar .navbar-brand {
     font-weight: 700;
     letter-spacing: 0.01em;
+}
+
+.cdm-brand-logo {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+    display: inline-block;
 }
 
 .cdm-topbar .nav-link {
@@ -161,13 +168,15 @@ body {
 
 .cdm-logo-wall {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(140px, 160px));
     gap: 0.75rem;
+    justify-content: center;
 }
 
 @media (max-width: 992px) {
     .cdm-logo-wall {
         grid-template-columns: repeat(3, minmax(0, 1fr));
+        justify-content: center;
     }
 }
 
@@ -182,6 +191,42 @@ body {
     font-weight: 700;
     letter-spacing: 0.06em;
     color: rgba(255, 255, 255, 0.92);
+}
+
+.cdm-logo--ua {
+    background: #ffffff;
+    border-color: rgba(255, 255, 255, 0.65);
+    padding: 1.15rem 0.95rem;
+    min-height: 72px;
+}
+
+.cdm-logo--aub {
+    background: #ffffff;
+    border-color: rgba(255, 255, 255, 0.65);
+    padding: 1.15rem 0.95rem;
+    min-height: 72px;
+}
+
+.cdm-logo--uab {
+    background: #ffffff;
+    border-color: rgba(255, 255, 255, 0.65);
+    padding: 1.15rem 0.95rem;
+    min-height: 72px;
+}
+
+.cdm-logo--lsu {
+    background: #ffffff;
+    border-color: rgba(255, 255, 255, 0.65);
+    padding: 1.15rem 0.95rem;
+    min-height: 72px;
+}
+
+.cdm-logo-img {
+    max-width: 100%;
+    max-height: 56px;
+    object-fit: contain;
+    display: block;
+    filter: drop-shadow(0 10px 22px rgba(0, 0, 0, 0.18));
 }
 
 .cdm-feature-card {
@@ -428,6 +473,43 @@ button.cdm-chip {
     border-bottom: 1px solid var(--cdm-border);
     position: relative;
     overflow: hidden;
+}
+
+.cdm-save-btn {
+    width: 2.05rem;
+    height: 2.05rem;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    border: 1px solid rgba(17, 24, 39, 0.12);
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 10px 25px rgba(17, 24, 39, 0.12);
+    line-height: 1;
+    font-size: 1.1rem;
+}
+
+.cdm-save-btn--corner {
+    position: absolute;
+    top: 0.55rem;
+    right: 0.55rem;
+}
+
+.cdm-save-btn--on {
+    border-color: rgba(158, 27, 50, 0.35);
+    background: rgba(255, 255, 255, 0.96);
+    color: var(--cdm-crimson);
+}
+
+.cdm-save-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 35px rgba(17, 24, 39, 0.14);
+}
+
+.cdm-save-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(158, 27, 50, 0.18), 0 14px 35px rgba(17, 24, 39, 0.14);
 }
 
 .cdm-listing-thumb-img {

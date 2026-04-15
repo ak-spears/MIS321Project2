@@ -261,6 +261,46 @@ public sealed class UserRepository
         }
     }
 
+    public async Task<PublicUserProfileDto?> GetPublicProfileByIdAsync(int userId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        const string sql = """
+            SELECT user_id, campus_id, display_name, lives_on_campus, dorm_building, suite_letter, avatar_url
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        await using var cmd = new MySqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@UserId", userId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        string? suite = null;
+        if (!reader.IsDBNull(5))
+        {
+            var s = reader.GetString(5);
+            suite = string.IsNullOrWhiteSpace(s) ? null : s.Trim().ToUpperInvariant()[0].ToString();
+        }
+
+        return new PublicUserProfileDto
+        {
+            UserId = reader.GetInt32(0),
+            CampusId = reader.GetInt32(1),
+            DisplayName = reader.GetString(2),
+            LivesOnCampus = reader.GetBoolean(3),
+            DormBuilding = reader.IsDBNull(4) ? null : reader.GetString(4),
+            SuiteLetter = suite,
+            AvatarUrl = reader.IsDBNull(6) ? null : reader.GetString(6),
+        };
+    }
+
     private enum ProfileGapReadMode
     {
         Full,
@@ -445,6 +485,16 @@ public sealed class UserRepository
         }
         catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnDbError(mx))
         {
+            var wantsGap =
+                !string.IsNullOrWhiteSpace(request.DefaultGapSolution) ||
+                !string.IsNullOrWhiteSpace(request.PreferredReceiveGap);
+            if (wantsGap)
+            {
+                throw new InvalidOperationException(
+                    "Profile fulfillment preference columns are missing. Run database/alter_users_fulfillment_preferences_safe.sql (or run database/alter_users_default_gap_solution.sql and database/alter_users_preferred_receive_gap.sql).",
+                    ex);
+            }
+
             try
             {
                 return await ExecuteUserProfileUpdateAsync(

@@ -1,4 +1,4 @@
-/* Campus Dorm Marketplace frontend app logic goes here. */
+/* Bama Marketplace frontend app logic goes here. */
 
 /**
  * API origin. Override with &lt;meta name="cdm-api-base" content="https://your-api.herokuapp.com" /&gt; if UI and API differ.
@@ -55,6 +55,46 @@ function formatAuthNetworkError() {
 const TOKEN_KEY = "cdm_jwt";
 /** Listing ids (strings) the user marked as handed off for free / donation listings (browser only). */
 const DONATION_HANDOFF_KEY = "cdm_donation_handoff_v1";
+/** Listing keys (strings) the user starred/saved (browser only). */
+const SAVED_LISTINGS_KEY = "cdm_saved_listings_v1";
+const ADMIN_SESSION_KEY = "cdm_admin_session_v1";
+
+function getAdminSessionPassword() {
+    try {
+        const raw = sessionStorage.getItem(ADMIN_SESSION_KEY);
+        const v = raw ? String(raw) : "";
+        return v.trim() ? v.trim() : null;
+    } catch {
+        return null;
+    }
+}
+
+function setAdminSessionPassword(pw) {
+    try {
+        if (pw && String(pw).trim()) {
+            sessionStorage.setItem(ADMIN_SESSION_KEY, String(pw).trim());
+        } else {
+            sessionStorage.removeItem(ADMIN_SESSION_KEY);
+        }
+    } catch {
+        /* ignore */
+    }
+}
+
+function adminLogoutToHome() {
+    setAdminSessionPassword(null);
+
+    // Also clear any user auth so "admin logout" is a true logout.
+    state.token = null;
+    state.authEmail = null;
+    state.authAvatarUrl = null;
+    state.preferredGapSolution = null;
+    state.currentAiCropBox = null;
+    setStoredToken(null);
+
+    state.view = "home";
+    render();
+}
 
 function getDonationHandoffCompletedIds() {
     try {
@@ -70,6 +110,20 @@ function markDonationHandoffCompleted(listingId) {
     const s = getDonationHandoffCompletedIds();
     s.add(String(listingId));
     localStorage.setItem(DONATION_HANDOFF_KEY, JSON.stringify([...s]));
+}
+
+function getSavedListingKeys() {
+    try {
+        const raw = localStorage.getItem(SAVED_LISTINGS_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? new Set(arr.map(String)) : new Set();
+    } catch {
+        return new Set();
+    }
+}
+
+function setSavedListingKeys(keys) {
+    localStorage.setItem(SAVED_LISTINGS_KEY, JSON.stringify([...keys].map(String)));
 }
 
 function getStoredToken() {
@@ -97,17 +151,20 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
+    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
     view: "home",
     /** `GET /api/listings/{id}` when viewing own donation detail (read-only + QR). */
     donationDetailListingId: /** @type {number | null} */ (null),
     /** Which panel to show on the auth page. */
     authPageMode: /** @type {'login' | 'signup'} */ ("login"),
     listingKey: null,
+    sellerProfileUserId: /** @type {number | null} */ (null),
     /**
      * @type {null | { type: 'navigate', view: 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'profile' } | { type: 'donation-detail', listingId: number } | { type: 'buy', listingKey: string }}
      */
     afterLoginIntent: null,
+    /** Saved/starred listing keys (browser only). */
+    savedListingKeys: getSavedListingKeys(),
     /** Home feed: listing key → image URL (set in JS after fetch; avoids huge src in innerHTML). */
     feedThumbSrcByKey: /** @type {Record<string, string>} */ ({}),
     /** My listings (API): listing id string → image URL for post-render hydration. */
@@ -128,6 +185,10 @@ const state = {
         categoryChips: new Set(),
         /** @type {Set<string>} small_dorm | any_space | __none__ */
         spaceKeys: new Set(),
+        /** @type {null | number} */
+        priceMin: null,
+        /** @type {null | number} */
+        priceMax: null,
     },
     /** Home hero search: filters feed by title + blurb (substring, case-insensitive). */
     feedSearchQuery: "",
@@ -148,6 +209,7 @@ const state = {
  *   title: string,
  *   blurb: string,
  *   priceLabel: string,
+ *   priceNum: number,
  *   photoDataUrl: string | null,
  *   campusId: number | null,
  *   gapSolution: string | null,
@@ -716,6 +778,16 @@ function homeFeedCardHtml(item) {
     const price = escapeHtml(item.priceLabel);
     const key = escapeHtml(item.key);
     const fb = encodeURIComponent(item.title || "Listing");
+    const saved = state.savedListingKeys.has(item.key);
+    const saveBtn = `
+        <button
+            type="button"
+            class="btn btn-sm btn-light cdm-save-btn cdm-save-btn--corner ${saved ? "cdm-save-btn--on" : ""}"
+            data-action="toggle-save"
+            data-listing-key="${key}"
+            aria-pressed="${saved ? "true" : "false"}"
+            title="${saved ? "Unsave" : "Save"}"
+        >${saved ? "★" : "☆"}</button>`;
     const thumbImg = item.photoDataUrl
         ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
         : "";
@@ -726,7 +798,7 @@ function homeFeedCardHtml(item) {
     return `
         <div class="col-12 col-md-6 col-xl-4">
             <div class="cdm-card cdm-listing-card">
-                <div class="cdm-listing-thumb">${thumbImg}</div>
+                <div class="cdm-listing-thumb">${thumbImg}${saveBtn}</div>
                 <div class="p-3">
                     <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="${key}">${title}</button>
                     <div class="cdm-muted small">${blurb}</div>
@@ -741,10 +813,42 @@ function homeFeedCardHtml(item) {
     `;
 }
 
+function syncSavedCountBadges(root = document) {
+    const n = state.savedListingKeys.size;
+    root.querySelectorAll("[data-saved-count]").forEach((el) => {
+        el.textContent = String(n);
+        el.classList.toggle("d-none", n < 1);
+    });
+}
+
+function toggleSavedListingKey(key) {
+    const k = String(key || "").trim();
+    if (!k) return;
+    if (state.savedListingKeys.has(k)) {
+        state.savedListingKeys.delete(k);
+    } else {
+        state.savedListingKeys.add(k);
+    }
+    setSavedListingKeys(state.savedListingKeys);
+    syncSavedCountBadges(document);
+    if (state.view === "saved") {
+        void renderSaved();
+        return;
+    }
+    // Refresh home grid so stars update in-place.
+    if (state.view === "home") refreshHomeFeedGrid();
+}
+
 function applyFeedFilters(items) {
     const f = state.feedFilters;
     const q = (state.feedSearchQuery || "").trim().toLowerCase();
     return items.filter((row) => {
+        if (f.priceMin != null) {
+            if (!Number.isFinite(row.priceNum) || row.priceNum < f.priceMin) return false;
+        }
+        if (f.priceMax != null) {
+            if (!Number.isFinite(row.priceNum) || row.priceNum > f.priceMax) return false;
+        }
         if (f.listingKinds.size > 0) {
             if (!f.listingKinds.has(row.listingKind)) return false;
         }
@@ -826,6 +930,7 @@ async function fetchFeedItemsForHome() {
                         title: row.title,
                         blurb,
                         priceLabel: priceNum === 0 ? "Free" : `$${priceNum.toFixed(2)}`,
+                        priceNum,
                         photoDataUrl: img,
                         campusId,
                         gapSolution,
@@ -848,6 +953,7 @@ async function fetchFeedItemsForHome() {
             title: x.title,
             blurb: x.blurb,
             priceLabel: x.priceLabel,
+            priceNum,
             photoDataUrl,
             campusId: x.campusId ?? 1,
             gapSolution: x.gapSolution ?? null,
@@ -913,6 +1019,15 @@ function wireFeedCardButtons(root) {
             navigateListing(key);
         });
     });
+    root.querySelectorAll("[data-action='toggle-save']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const key = btn.getAttribute("data-listing-key");
+            if (!key) return;
+            toggleSavedListingKey(key);
+        });
+    });
 }
 
 function syncFeedFilterSummaries() {
@@ -951,6 +1066,20 @@ function syncFeedFilterSummaries() {
             : f.spaceKeys.size === 1
               ? spaceFilterShortLabel([...f.spaceKeys][0])
               : `${f.spaceKeys.size} selected`,
+    );
+    const fmt = (n) => {
+        if (!Number.isFinite(n)) return "";
+        return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
+    };
+    setText(
+        "cdm-filter-price-summary",
+        f.priceMin == null && f.priceMax == null
+            ? "Any"
+            : f.priceMin != null && f.priceMax != null
+              ? `${fmt(f.priceMin)}–${fmt(f.priceMax)}`
+              : f.priceMin != null
+                ? `${fmt(f.priceMin)}+`
+                : `≤ ${fmt(f.priceMax)}`,
     );
 }
 
@@ -1036,6 +1165,8 @@ function wireHomeFeedFilters(root) {
         f.listingKinds.clear();
         f.gapKeys.clear();
         f.spaceKeys.clear();
+        f.priceMin = null;
+        f.priceMax = null;
         /** Keep hero-only chip keys (not represented as sidebar checkboxes). */
         const heroOnlyCat = new Set(["mini_fridge", "microwave"]);
         const keptCats = new Set([...f.categoryChips].filter((k) => heroOnlyCat.has(k)));
@@ -1057,6 +1188,18 @@ function wireHomeFeedFilters(root) {
             const v = el.getAttribute("data-filter-space");
             if (v) f.spaceKeys.add(v);
         });
+        const priceMinEl = panel.querySelector('input[data-filter-price="min"]');
+        const priceMaxEl = panel.querySelector('input[data-filter-price="max"]');
+        const parsePrice = (el) => {
+            if (!(el instanceof HTMLInputElement)) return null;
+            const raw = String(el.value || "").trim();
+            if (!raw) return null;
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return null;
+            return n < 0 ? 0 : n;
+        };
+        f.priceMin = parsePrice(priceMinEl);
+        f.priceMax = parsePrice(priceMaxEl);
         syncFeedFilterSummaries();
         syncCategoryChipElements(document.getElementById("cdm-feed-category-chips"));
         refreshHomeFeedGrid();
@@ -1065,12 +1208,19 @@ function wireHomeFeedFilters(root) {
     panel.querySelectorAll('input[type="checkbox"]').forEach((el) => {
         el.addEventListener("change", readFiltersFromDom);
     });
+    panel.querySelectorAll('input[data-filter-price]').forEach((el) => {
+        el.addEventListener("input", readFiltersFromDom);
+        el.addEventListener("change", readFiltersFromDom);
+    });
 
     document.getElementById("cdm-filter-clear")?.addEventListener("click", (e) => {
         e.preventDefault();
         state.feedFilters.categoryChips.clear();
         panel.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
             cb.checked = false;
+        });
+        panel.querySelectorAll('input[data-filter-price]').forEach((inp) => {
+            if (inp instanceof HTMLInputElement) inp.value = "";
         });
         state.feedSearchQuery = "";
         const searchEl = document.getElementById("search");
@@ -1112,6 +1262,9 @@ function navigate(view) {
     }
     if (state.view === "donation-detail" && view !== "donation-detail") {
         state.donationDetailListingId = null;
+    }
+    if (state.view === "seller-profile" && view !== "seller-profile") {
+        state.sellerProfileUserId = null;
     }
     if (view === "auth") {
         state.view = "auth";
@@ -1501,8 +1654,8 @@ function openDonationDetail(listingId) {
 }
 
 /**
- * Primary top bar: Home, About, Help, Contact, DONATIONS (DONATIONS emphasized in CSS).
- * @param {null | 'go-home' | 'nav-about' | 'nav-help' | 'nav-contact' | 'nav-donations'} active — `data-action` of current page for aria-current.
+ * Primary top bar: Home, Help, Contact, DONATIONS (DONATIONS emphasized in CSS).
+ * @param {null | 'go-home' | 'nav-help' | 'nav-contact' | 'nav-donations'} active — `data-action` of current page for aria-current.
  */
 function topNavPrimaryLinksHtml(active) {
     const li = (action, label, extraClass = "") => {
@@ -1513,7 +1666,6 @@ function topNavPrimaryLinksHtml(active) {
     };
     return `<ul class="navbar-nav me-auto mb-2 mb-lg-0">
                             ${li("go-home", "Home")}
-                            ${li("nav-about", "About")}
                             ${li("nav-help", "Help")}
                             ${li("nav-contact", "Contact")}
                             ${li("nav-donations", "DONATIONS", "cdm-nav-donations")}
@@ -1528,7 +1680,6 @@ function wireNav(root) {
         });
     });
     for (const [action, view] of /** @type {const} */ ([
-        ["nav-about", "about"],
         ["nav-help", "help"],
         ["nav-contact", "contact"],
         ["nav-donations", "donations"],
@@ -1540,6 +1691,13 @@ function wireNav(root) {
             });
         });
     }
+    root.querySelectorAll("[data-action='nav-saved']").forEach((el) => {
+        el.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigate("saved");
+        });
+    });
+    syncSavedCountBadges(root);
     root.querySelectorAll("[data-action='post-item']").forEach((btn) => {
         btn.addEventListener("click", () => {
             if (!requireAuth({ type: "navigate", view: "post" })) return;
@@ -1666,6 +1824,27 @@ function wireTradeActions(root) {
                 pickupStart: snap.pickupStart ?? null,
                 pickupEnd: snap.pickupEnd ?? null,
             });
+        });
+    });
+
+    root.querySelectorAll("[data-action='view-seller']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const idRaw = btn.getAttribute("data-seller-id");
+            const id = Number(idRaw);
+            if (!Number.isFinite(id) || id <= 0) return;
+            state.sellerProfileUserId = id;
+            navigate("seller-profile");
+        });
+    });
+
+    root.querySelectorAll("[data-action='toggle-save']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const key = btn.getAttribute("data-listing-key");
+            if (!key) return;
+            toggleSavedListingKey(key);
         });
     });
 }
@@ -1867,7 +2046,7 @@ function wirePostForm(root) {
     if (subtitleText) {
         subtitleText.innerHTML = isEditing
             ? `Updating <span class="fw-semibold">${escapeHtml(String(prefill?.title ?? "listing"))}</span> — saved on the server.`
-            : `New posts are saved to the server and appear on other users’ home feeds.`;
+            : ``;
     }
     if (submitBtn) submitBtn.textContent = isEditing ? "Save changes" : "Publish listing";
 
@@ -1933,8 +2112,7 @@ function wirePostForm(root) {
 
     const hintEl = root.querySelector("#post-listing-type-hint");
     if (hintEl) {
-        hintEl.innerHTML =
-            "Selling: 7% platform fee on the seller side (policy — not charged in this draft). Use <strong>Donations</strong> in the nav to create a free listing.";
+        hintEl.innerHTML = "";
     }
 
     syncListingMode();
@@ -2293,8 +2471,8 @@ async function renderDonatePost() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -2449,6 +2627,17 @@ async function renderDonatePost() {
                                 <div class="col-12">
                                     <label class="form-label fw-semibold" for="donation-dimensions">Dimensions (optional)</label>
                                     <input class="form-control" id="donation-dimensions" name="dimensions" type="text" placeholder='e.g., 18" W × 20" D × 34" H' />
+                                </div>
+
+                                <div class="col-12">
+                                    <label class="form-label fw-semibold" for="donation-description">Description (optional)</label>
+                                    <textarea
+                                        class="form-control"
+                                        id="donation-description"
+                                        name="description"
+                                        rows="3"
+                                        placeholder="Anything the drop-off team or next student should know (included parts, size notes, minor wear, etc.)"
+                                    ></textarea>
                                 </div>
 
                                 <div class="col-12">
@@ -2643,6 +2832,7 @@ function wireDonationForm(root) {
         if (!isDonationEligibleConditionKey(ck)) ck = "fair";
         setValue("condition", ck);
         setValue("dimensions", prefill.dimensions ?? prefill.Dimensions ?? "");
+        setValue("description", prefill.description ?? prefill.Description ?? "");
     }
 
     if (!isEditing) {
@@ -2821,9 +3011,10 @@ function wireDonationForm(root) {
             return;
         }
 
+        const descTyped = String(fd.get("description") || "").trim();
         const descExisting =
             isEditing && prefill ? String(prefill.description ?? prefill.Description ?? "").trim() : "";
-        const description = descExisting || DONATION_DEFAULT_DESCRIPTION;
+        const description = descTyped || descExisting || DONATION_DEFAULT_DESCRIPTION;
 
         /** @type {Record<string, unknown>} */
         const payload = {
@@ -2890,7 +3081,7 @@ function renderStaticSitePage() {
     const sections = {
         about: {
             title: "About",
-            html: `<p class="mb-0">Campus Dorm Marketplace connects students moving out with students moving in—list what you no longer need and find what your room is missing. Built for on-campus housing workflows (dorms, suites, and move dates).</p>`,
+            html: `<p class="mb-0">Bama Marketplace connects students moving out with students moving in—list what you no longer need and find what your room is missing. Built for on-campus housing workflows (dorms, suites, and move dates).</p>`,
         },
         help: {
             title: "Help",
@@ -3001,7 +3192,6 @@ function renderStaticSitePage() {
     if (!meta) return;
 
     const activeByView = {
-        about: "nav-about",
         help: "nav-help",
         contact: "nav-contact",
         donations: "nav-donations",
@@ -3016,8 +3206,8 @@ function renderStaticSitePage() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -3088,8 +3278,8 @@ async function renderProfile() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -3338,21 +3528,33 @@ function renderAuthNav() {
     if (!slot) return;
 
     const status = state.apiHealth.status ?? "unknown";
+    const adminPw = getAdminSessionPassword();
 
     if (state.token) {
         const label = state.authEmail ? state.authEmail : "Signed in";
         const navAv = escapeHtml(resolveAvatarSrc(state.authAvatarUrl));
+        const savedCount = state.savedListingKeys.size;
+        const savedBadge = `<span class="badge rounded-pill ms-2 align-middle bg-light text-dark border ${savedCount < 1 ? "d-none" : ""}" data-saved-count>${savedCount}</span>`;
         slot.innerHTML = `
             <span class="cdm-pill" id="api-pill">API: ${status}</span>
             <img class="cdm-nav-avatar rounded-circle border border-2 border-white" src="${navAv}" width="36" height="36" alt="" />
             <span class="text-white small opacity-90 text-truncate" style="max-width: 10rem" title="${state.authEmail ?? ""}">${label}</span>
+            <button class="btn btn-outline-light btn-sm" type="button" data-action="nav-saved">Saved${savedBadge}</button>
             <button class="btn btn-light btn-sm" type="button" id="auth-profile-btn">Profile</button>
             <button class="btn btn-outline-light btn-sm" type="button" id="auth-logout-btn">Log out</button>
+        `;
+    } else if (adminPw) {
+        slot.innerHTML = `
+            <span class="cdm-pill" id="api-pill">API: ${status}</span>
+            <span class="cdm-pill" id="admin-pill">You are logged in as an admin</span>
+            <button class="btn btn-light btn-sm" type="button" id="admin-dashboard-btn">Admin</button>
+            <button class="btn btn-outline-light btn-sm" type="button" id="admin-logout-btn">Admin logout</button>
         `;
     } else {
         slot.innerHTML = `
             <span class="cdm-pill" id="api-pill">API: ${status}</span>
             <button class="btn btn-light btn-sm" type="button" id="auth-open-login" data-auth-mode="login">Log in</button>
+            <button class="btn btn-outline-light btn-sm" type="button" id="auth-open-admin">Admin login</button>
             <button class="btn btn-outline-light btn-sm" type="button" id="auth-open-signup" data-auth-mode="signup">Sign up</button>
         `;
     }
@@ -3370,6 +3572,16 @@ function renderAuthNav() {
 
     document.getElementById("auth-open-login")?.addEventListener("click", () => navigateAuth("login"));
     document.getElementById("auth-open-signup")?.addEventListener("click", () => navigateAuth("signup"));
+    document.getElementById("auth-open-admin")?.addEventListener("click", () => navigate("admin-login"));
+    document.getElementById("admin-dashboard-btn")?.addEventListener("click", () => navigate("admin"));
+    document.getElementById("admin-logout-btn")?.addEventListener("click", () => {
+        adminLogoutToHome();
+    });
+    slot.querySelector('[data-action="nav-saved"]')?.addEventListener("click", (e) => {
+        e.preventDefault();
+        navigate("saved");
+    });
+    syncSavedCountBadges(slot);
 }
 
 /** Shared login + signup markup (same ids as before; used only on the auth page). */
@@ -3490,8 +3702,8 @@ function renderAuth() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -3538,6 +3750,278 @@ function renderAuth() {
     wireNav(shell);
     wireAuthPage();
     ensureAuthUi();
+}
+
+function renderAdminLogin() {
+    const root = document.getElementById("app");
+    const existing = getAdminSessionPassword();
+    if (existing) {
+        navigate("admin");
+        return;
+    }
+
+    root.innerHTML = "";
+    const shell = el(`
+      <div class="cdm-shell">
+        <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+          <div class="container-fluid cdm-max px-3 px-lg-4">
+            <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+              <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+              <span class="opacity-90">Bama Marketplace</span>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavAdminLogin" aria-controls="cdmNavAdminLogin" aria-expanded="false" aria-label="Toggle navigation">
+              <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="cdmNavAdminLogin">
+              ${topNavPrimaryLinksHtml(null)}
+              <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+              </div>
+            </div>
+          </div>
+        </nav>
+
+        <div class="body-content cdm-body-content">
+          <div class="container-fluid cdm-max px-3 px-lg-4 py-4">
+            <div class="cdm-surface p-4 p-lg-5">
+              <h1 class="h3 cdm-title mb-2">Admin login</h1>
+              <p class="cdm-muted mb-4">Enter the admin password to view reports.</p>
+              <form id="admin-login-form" class="cdm-card p-4">
+                <div class="mb-3">
+                  <label class="form-label fw-semibold" for="admin-password">Password</label>
+                  <input id="admin-password" class="form-control" type="password" autocomplete="current-password" />
+                </div>
+                <div class="d-flex gap-2">
+                  <button class="btn cdm-btn-crimson" type="submit">Continue</button>
+                  <button class="btn btn-outline-secondary" type="button" data-action="go-home">Cancel</button>
+                </div>
+                <div class="small text-danger mt-3 d-none" id="admin-login-error"></div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+
+    shell.querySelector("#admin-login-form")?.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const pw = shell.querySelector("#admin-password")?.value ?? "";
+        const err = shell.querySelector("#admin-login-error");
+        if (err) err.classList.add("d-none");
+
+        // Validate by hitting dashboard once.
+        const res = await fetch(`${API_BASE}/api/admin/dashboard?weeks=1`, {
+            headers: { "X-Admin-Password": String(pw) },
+        });
+        if (!res.ok) {
+            if (err) {
+                err.textContent = "Wrong password.";
+                err.classList.remove("d-none");
+            }
+            return;
+        }
+        setAdminSessionPassword(pw);
+        navigate("admin");
+    });
+}
+
+async function renderAdminDashboard() {
+    const root = document.getElementById("app");
+    const pw = getAdminSessionPassword();
+    if (!pw) {
+        navigate("admin-login");
+        return;
+    }
+
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading admin dashboard…</div></div>`;
+    const res = await fetch(`${API_BASE}/api/admin/dashboard?weeks=12`, {
+        headers: { Accept: "application/json", "X-Admin-Password": pw },
+    });
+    if (!res.ok) {
+        setAdminSessionPassword(null);
+        navigate("admin-login");
+        return;
+    }
+    const data = await res.json().catch(() => ({}));
+
+    const weekly = Array.isArray(data.newListingsByWeek) ? data.newListingsByWeek : [];
+    const revenue = Array.isArray(data.revenueByWeek) ? data.revenueByWeek : [];
+    const donation = data.donationHandoffs ?? {};
+    const lowRated = Array.isArray(data.lowRatedUsers) ? data.lowRatedUsers : [];
+    const flagged = Array.isArray(data.flaggedOrHarshReviews) ? data.flaggedOrHarshReviews : [];
+
+    const weeklyRows = weekly.length
+        ? weekly
+              .slice(0, 12)
+              .map((r) => `<tr><td>${escapeHtml(String(r.weekStart ?? ""))}</td><td class="text-end">${escapeHtml(String(r.count ?? 0))}</td></tr>`)
+              .join("")
+        : `<tr><td colspan="2" class="cdm-muted">No data yet.</td></tr>`;
+
+    const revenueRows = revenue.length
+        ? revenue
+              .slice(0, 12)
+              .map((r) => {
+                  const ws = String(r.weekStart ?? "");
+                  const gross = Number(r.grossAmount ?? 0);
+                  const fees = Number(r.platformFees ?? 0);
+                  const txns = Number(r.completedTransactions ?? 0);
+                  return `<tr><td>${escapeHtml(ws)}</td><td class="text-end">$${gross.toFixed(2)}</td><td class="text-end">$${fees.toFixed(2)}</td><td class="text-end">${txns}</td></tr>`;
+              })
+              .join("")
+        : `<tr><td colspan="4" class="cdm-muted">No completed transactions yet.</td></tr>`;
+
+    const lowRows = lowRated.length
+        ? lowRated
+              .slice(0, 50)
+              .map((u) => {
+                  const avg = Number(u.avgRating ?? 0);
+                  const c = Number(u.ratingCount ?? 0);
+                  return `<tr><td>${escapeHtml(String(u.userId ?? ""))}</td><td>${escapeHtml(String(u.displayName ?? ""))}</td><td class="text-end">${avg.toFixed(2)}</td><td class="text-end">${c}</td></tr>`;
+              })
+              .join("")
+        : `<tr><td colspan="4" class="cdm-muted">None.</td></tr>`;
+
+    const flaggedRows = flagged.length
+        ? flagged
+              .slice(0, 100)
+              .map((r) => {
+                  const score = Number(r.score ?? 0);
+                  const tags = [
+                      r.isFlagged ? "flagged" : null,
+                      r.isHarsh ? "harsh" : null,
+                      score <= 3 ? "≤3★" : null,
+                  ]
+                      .filter(Boolean)
+                      .join(", ");
+                  return `<tr>
+                    <td>${escapeHtml(String(r.ratingId ?? ""))}</td>
+                    <td>${escapeHtml(String(r.listingId ?? ""))}</td>
+                    <td>${escapeHtml(String(r.rateeId ?? ""))}</td>
+                    <td class="text-end">${score}</td>
+                    <td>${escapeHtml(tags)}</td>
+                    <td class="cdm-muted">${escapeHtml(String(r.comment ?? ""))}</td>
+                  </tr>`;
+              })
+              .join("")
+        : `<tr><td colspan="6" class="cdm-muted">None.</td></tr>`;
+
+    const picked = Number(donation.pickedUpCount ?? 0);
+    const notPicked = Number(donation.notPickedUpCount ?? 0);
+
+    root.innerHTML = "";
+    const shell = el(`
+      <div class="cdm-shell">
+        <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+          <div class="container-fluid cdm-max px-3 px-lg-4">
+            <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+              <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+              <span class="opacity-90">Bama Marketplace</span>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavAdmin" aria-controls="cdmNavAdmin" aria-expanded="false" aria-label="Toggle navigation">
+              <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="cdmNavAdmin">
+              ${topNavPrimaryLinksHtml(null)}
+              <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                <button class="btn btn-outline-light btn-sm" type="button" id="admin-logout">Admin logout</button>
+              </div>
+            </div>
+          </div>
+        </nav>
+
+        <div class="body-content cdm-body-content">
+          <div class="container-fluid cdm-max px-3 px-lg-4 py-3">
+            <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
+              <div>
+                <h1 class="h3 cdm-title mb-1">Admin</h1>
+                <p class="cdm-muted small mb-0">Weekly postings, revenue, reviews, and donation handoffs.</p>
+              </div>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-12 col-lg-6">
+                <div class="cdm-card p-4">
+                  <div class="fw-semibold mb-2">New postings per week</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>Week start</th><th class="text-end">Listings</th></tr></thead>
+                      <tbody>${weeklyRows}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-lg-6">
+                <div class="cdm-card p-4">
+                  <div class="fw-semibold mb-2">Revenue (completed transactions)</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>Week start</th><th class="text-end">Gross</th><th class="text-end">Fees</th><th class="text-end">Txns</th></tr></thead>
+                      <tbody>${revenueRows}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-lg-4">
+                <div class="cdm-card p-4">
+                  <div class="fw-semibold mb-2">Donations picked up</div>
+                  <div class="d-flex align-items-end justify-content-between">
+                    <div>
+                      <div class="display-6 fw-bold">${picked}</div>
+                      <div class="cdm-muted small">Picked up</div>
+                    </div>
+                    <div class="text-end">
+                      <div class="display-6 fw-bold">${notPicked}</div>
+                      <div class="cdm-muted small">Not picked up</div>
+                    </div>
+                  </div>
+                  <div class="cdm-muted small mt-3">Requires <code>listings.donation_handed_off_at</code> column.</div>
+                </div>
+              </div>
+
+              <div class="col-12 col-lg-8">
+                <div class="cdm-card p-4">
+                  <div class="fw-semibold mb-2">Low-rated users (≤ 3.0 avg)</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>User</th><th>Name</th><th class="text-end">Avg</th><th class="text-end">Count</th></tr></thead>
+                      <tbody>${lowRows}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12">
+                <div class="cdm-card p-4">
+                  <div class="fw-semibold mb-2">Flagged / harsh / ≤3★ reviews</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>ID</th><th>Listing</th><th>Ratee</th><th class="text-end">★</th><th>Tags</th><th>Comment</th></tr></thead>
+                      <tbody>${flaggedRows}</tbody>
+                    </table>
+                  </div>
+                  <div class="cdm-muted small mt-3">Flag fields require <code>ratings.is_flagged</code> + <code>ratings.is_harsh</code>.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+    syncSavedCountBadges(shell);
+
+    shell.querySelector("#admin-logout")?.addEventListener("click", () => {
+        adminLogoutToHome();
+    });
 }
 
 function setAuthAlert(message) {
@@ -3795,6 +4279,28 @@ function buildHomeFiltersHtml() {
 
       <div class="dropdown w-100 mb-2">
         <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+          <span class="fw-semibold small">Price</span>
+          <span id="cdm-filter-price-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
+        </button>
+        <div class="dropdown-menu dropdown-menu-end shadow-sm border-0 p-3 cdm-filter-menu" style="min-width: 100%">
+          <div class="row g-2">
+            <div class="col-6">
+              <label class="form-label small mb-1" for="ff-price-min">Min</label>
+              <input class="form-control form-control-sm" id="ff-price-min" inputmode="decimal" type="number" min="0" step="0.01" placeholder="0" data-filter-price="min" />
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-1" for="ff-price-max">Max</label>
+              <input class="form-control form-control-sm" id="ff-price-max" inputmode="decimal" type="number" min="0" step="0.01" placeholder="200" data-filter-price="max" />
+            </div>
+            <div class="col-12">
+              <div class="cdm-muted small mb-0">Includes donations (Free = $0.00).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dropdown w-100 mb-2">
+        <button class="btn btn-light border rounded-3 w-100 d-flex justify-content-between align-items-center py-2 px-3" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
           <span class="fw-semibold small">Delivery type</span>
           <span id="cdm-filter-gap-summary" class="small text-muted text-truncate ps-2" style="max-width: 58%">Any</span>
         </button>
@@ -3826,8 +4332,8 @@ async function renderHome() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -3969,28 +4475,23 @@ async function renderHome() {
                 <section class="cdm-band--dark cdm-section cdm-section--tight mt-5">
                     <div class="container-fluid cdm-max px-3 px-lg-4">
                         <div class="d-flex align-items-end justify-content-between gap-3 mb-3">
-                            <div>
-                                <div class="h4 cdm-title mb-1">We support</div>
-                                <div class="cdm-muted">White‑label deployments: per-campus branding + dorm/location settings.</div>
+                            <div class="w-100 text-center">
+                                <div class="h4 cdm-title mb-0">We support</div>
                             </div>
-                            <div class="cdm-muted small d-none d-md-block">Shared infrastructure, campus-specific configuration</div>
                         </div>
                         <div class="cdm-logo-wall">
-                            <div class="cdm-logo">UA</div>
-                            <div class="cdm-logo">AUB</div>
-                            <div class="cdm-logo">UAB</div>
-                            <div class="cdm-logo">BAMA</div>
-                            <div class="cdm-logo">LSU</div>
-                            <div class="cdm-logo">UGA</div>
-                            <div class="cdm-logo">UT</div>
-                            <div class="cdm-logo">UF</div>
-                            <div class="cdm-logo">FSU</div>
-                            <div class="cdm-logo">UK</div>
-                            <div class="cdm-logo">TAMU</div>
-                            <div class="cdm-logo">OU</div>
-                        </div>
-                        <div class="cdm-muted small mt-3">
-                            *Not affiliated with any university. (Placeholder disclaimer.)
+                            <div class="cdm-logo cdm-logo--ua">
+                                <img class="cdm-logo-img" src="./assets/ua-logo.png" alt="University of Alabama" />
+                            </div>
+                            <div class="cdm-logo cdm-logo--aub">
+                                <img class="cdm-logo-img" src="./assets/aub-logo.png" alt="Auburn University" />
+                            </div>
+                            <div class="cdm-logo cdm-logo--uab">
+                                <img class="cdm-logo-img" src="./assets/uab-logo.png" alt="University of Alabama at Birmingham" />
+                            </div>
+                            <div class="cdm-logo cdm-logo--lsu">
+                                <img class="cdm-logo-img" src="./assets/lsu-logo.png" alt="Louisiana State University" />
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -4048,9 +4549,7 @@ async function renderHome() {
                                         </div>
                                     </div>
                                 </div>
-                                <div class="cdm-muted small mt-3">
-                                    AI: smart matching ranks each buyer’s feed by dorm type, building, class year, and move-in date — with match score + reason. Two-sided matching shows sellers how many buyers want the item.
-                                </div>
+                                <div class="cdm-muted small mt-3 d-none"></div>
                             </div>
                         </div>
                     </div>
@@ -4104,9 +4603,9 @@ async function renderHome() {
                         <div class="d-flex align-items-end justify-content-between gap-3 mb-3">
                             <div>
                                 <div class="h3 cdm-title mb-1">FAQ</div>
-                                <div class="cdm-muted cdm-subtitle">Draft FAQ (brainstorm-driven).</div>
+                                <div class="cdm-muted cdm-subtitle d-none"></div>
                             </div>
-                            <div class="cdm-muted small d-none d-md-block">White-label scalability →</div>
+                            <div class="cdm-muted small d-none d-md-block"></div>
                         </div>
 
                         <div class="accordion" id="faqAccordion">
@@ -4154,7 +4653,7 @@ async function renderHome() {
                     <div class="container-fluid cdm-max px-3 px-lg-4">
                         <div class="row g-4">
                             <div class="col-12 col-lg-4">
-                                <div class="fw-semibold mb-2">Campus Dorm Marketplace</div>
+                                <div class="fw-semibold mb-2">Bama Marketplace</div>
                                 <div class="cdm-muted small">
                                     Single-page frontend + ASP.NET Core API + MySQL (raw SQL). Template customized for dorm move-out/move-in marketplace.
                                 </div>
@@ -4163,7 +4662,7 @@ async function renderHome() {
                                 <div class="cdm-muted small mb-2">Pages</div>
                                 <div class="d-flex flex-column gap-1">
                                     <a href="#" aria-disabled="true">Home</a>
-                                    <a href="#" aria-disabled="true">About</a>
+                                    <!-- About intentionally hidden for now -->
                                     <a href="#" aria-disabled="true">Help & FAQ</a>
                                 </div>
                             </div>
@@ -4185,7 +4684,7 @@ async function renderHome() {
                         </div>
                         <hr class="border-secondary border-opacity-25 my-4" />
                         <div class="cdm-muted small">
-                            © ${new Date().getFullYear()} Campus Dorm Marketplace. All rights reserved. (Placeholder)
+                            © ${new Date().getFullYear()} Bama Marketplace. All rights reserved. (Placeholder)
                         </div>
                     </div>
                 </footer>
@@ -4200,7 +4699,220 @@ async function renderHome() {
     wireHomeFeedFilters(shell);
     ensureAuthUi();
     hydrateFeedListingImages(shell);
+    wireFeedCardButtons(shell);
     wireListingImageFallbacks(shell);
+    syncSavedCountBadges(shell);
+}
+
+function homeFeedItemFromDbListingApiRow(row) {
+    const desc = (row.description || "").trim();
+    const cat = row.category || "listing";
+    const categorySlug = normalizeListingCategorySlug(row.category);
+    const seller = row.sellerDisplayName || "Seller";
+    const blurb = desc ? `${desc.slice(0, 72)}${desc.length > 72 ? "…" : ""} · ${cat} · ${seller}` : `${cat} · ${seller}`;
+    const priceNum = Number(row.price);
+    const urlRaw = row.imageUrl ?? row.ImageUrl;
+    const img = urlRaw && String(urlRaw).trim() ? String(urlRaw).trim() : demoThumbSvgDataUrl(row.title);
+    const key = `db:${row.listingId ?? row.ListingId}`;
+    state.feedThumbSrcByKey[key] = img;
+    const campusRaw = row.campusId ?? row.CampusId;
+    const campusId = campusRaw != null ? Number(campusRaw) : null;
+    const gapSolution = row.gapSolution ?? row.GapSolution ?? null;
+    const condition = row.condition ?? row.Condition ?? null;
+    const spaceRaw = row.spaceSuitability ?? row.SpaceSuitability ?? null;
+    const spaceSuitability = spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
+    return {
+        key,
+        title: row.title,
+        blurb,
+        priceLabel: priceNum === 0 ? "Free" : `$${priceNum.toFixed(2)}`,
+        priceNum,
+        photoDataUrl: img,
+        campusId,
+        gapSolution,
+        condition: condition != null && String(condition).trim() !== "" ? String(condition).trim() : null,
+        categorySlug,
+        listingKind: priceNum === 0 ? "donate" : "sell",
+        spaceSuitability,
+    };
+}
+
+async function fetchSavedItems() {
+    state.feedThumbSrcByKey = state.feedThumbSrcByKey || {};
+    const keys = [...state.savedListingKeys];
+    const out = [];
+    for (const key of keys.slice(0, 48)) {
+        if (String(key).startsWith("sample:")) {
+            const id = Number(String(key).slice(7));
+            const s = SAMPLE_HOME_FEED.find((x) => x.id === id);
+            if (!s) continue;
+            const priceNum = Number(s.priceNum);
+            const photoDataUrl = s.photoDataUrl || demoThumbSvgDataUrl(s.title);
+            state.feedThumbSrcByKey[key] = photoDataUrl;
+            out.push({
+                key,
+                title: s.title,
+                blurb: s.blurb,
+                priceLabel: s.priceLabel,
+                priceNum,
+                photoDataUrl,
+                campusId: s.campusId ?? 1,
+                gapSolution: s.gapSolution ?? null,
+                condition: null,
+                categorySlug: s.categorySlug ? normalizeListingCategorySlug(s.categorySlug) : null,
+                listingKind: priceNum === 0 ? "donate" : "sell",
+                spaceSuitability:
+                    s.spaceSuitability != null && String(s.spaceSuitability).trim() !== ""
+                        ? String(s.spaceSuitability).trim()
+                        : null,
+            });
+            continue;
+        }
+        if (String(key).startsWith("db:")) {
+            const rawId = String(key).slice(3);
+            try {
+                const res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(rawId)}`, {
+                    headers: { Accept: "application/json" },
+                });
+                if (!res.ok) continue;
+                const row = await res.json();
+                out.push(homeFeedItemFromDbListingApiRow(row));
+            } catch {
+                /* skip */
+            }
+        }
+    }
+    return out;
+}
+
+async function renderSaved() {
+    const root = document.getElementById("app");
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading saved…</div></div>`;
+
+    const items = await fetchSavedItems();
+    const gridHtml = items.length
+        ? items.map(homeFeedCardHtml).join("")
+        : `<div class="cdm-card p-5 text-center">
+             <div class="fw-semibold mb-2">No saved items yet</div>
+             <div class="cdm-muted small">Star items in the feed to keep them here.</div>
+           </div>`;
+
+    root.innerHTML = "";
+    const shell = el(`
+      <div class="cdm-shell">
+        <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+          <div class="container-fluid cdm-max px-3 px-lg-4">
+            <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+              <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+              <span class="opacity-90">Bama Marketplace</span>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavSaved" aria-controls="cdmNavSaved" aria-expanded="false" aria-label="Toggle navigation">
+              <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="cdmNavSaved">
+              ${topNavPrimaryLinksHtml("nav-saved")}
+              <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+              </div>
+            </div>
+          </div>
+        </nav>
+
+        <div class="body-content cdm-body-content">
+          <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+            <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
+              <div>
+                <h1 class="h3 cdm-title mb-1">Saved</h1>
+                <p class="cdm-muted small mb-0">${state.savedListingKeys.size} item${state.savedListingKeys.size === 1 ? "" : "s"}</p>
+              </div>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="cdm-saved-clear" ${state.savedListingKeys.size ? "" : "disabled"}>Clear saved</button>
+            </div>
+            <div class="row g-3" id="cdm-saved-grid">${gridHtml}</div>
+          </div>
+        </div>
+      </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+    hydrateFeedListingImages(shell);
+    wireFeedCardButtons(shell);
+    wireListingImageFallbacks(shell);
+    syncSavedCountBadges(shell);
+
+    shell.querySelector("#cdm-saved-clear")?.addEventListener("click", () => {
+        state.savedListingKeys.clear();
+        setSavedListingKeys(state.savedListingKeys);
+        syncSavedCountBadges(document);
+        void renderSaved();
+    });
+}
+
+async function renderSellerProfile() {
+    const root = document.getElementById("app");
+    const uid = Number(state.sellerProfileUserId);
+    if (!Number.isFinite(uid) || uid <= 0) {
+        navigate("home");
+        return;
+    }
+
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading seller…</div></div>`;
+    const { res, data } = await apiJson(`/api/users/${encodeURIComponent(String(uid))}/public`);
+    if (!res.ok) {
+        root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Seller not found.</div></div>`;
+        return;
+    }
+
+    const name = escapeHtml(data.displayName ?? data.DisplayName ?? "Seller");
+    const dorm = String(data.dormBuilding ?? data.DormBuilding ?? "").trim();
+    const suite = String(data.suiteLetter ?? data.SuiteLetter ?? "").trim();
+    const onCampus = Boolean(data.livesOnCampus ?? data.LivesOnCampus);
+    const avatar = resolveAvatarSrc(data.avatarUrl ?? data.AvatarUrl ?? null);
+    const locBits = [onCampus ? "On campus" : "Off campus", dorm || null, suite ? `Suite ${suite}` : null].filter(Boolean);
+
+    root.innerHTML = "";
+    const shell = el(`
+      <div class="cdm-shell">
+        <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+          <div class="container-fluid cdm-max px-3 px-lg-4">
+            <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+              <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+              <span class="opacity-90">Bama Marketplace</span>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavSeller" aria-controls="cdmNavSeller" aria-expanded="false" aria-label="Toggle navigation">
+              <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="cdmNavSeller">
+              ${topNavPrimaryLinksHtml(null)}
+              <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+              </div>
+            </div>
+          </div>
+        </nav>
+
+        <div class="body-content cdm-body-content">
+          <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+            <button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="go-home">← Back</button>
+            <div class="cdm-surface p-4 p-lg-5 mt-2">
+              <div class="d-flex flex-wrap align-items-center gap-3">
+                <img class="rounded-circle border bg-white" src="${escapeAttrForDoubleQuoted(avatar)}" width="72" height="72" alt="" style="object-fit:cover" />
+                <div class="min-w-0">
+                  <h1 class="h3 cdm-title mb-1">${name}</h1>
+                  <div class="cdm-muted small">${escapeHtml(locBits.join(" · ") || "")}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+    syncSavedCountBadges(shell);
 }
 
 async function renderPost() {
@@ -4248,8 +4960,8 @@ async function renderPost() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -4431,9 +5143,7 @@ async function renderPost() {
 
                                 <div class="col-12">
                                     <input type="hidden" name="listingType" id="post-listing-type" value="sell" />
-                                    <div class="cdm-muted small" id="post-listing-type-hint">
-                                        Selling: 7% platform fee on the seller side (policy — not charged in this draft). Use <strong>Donations</strong> in the nav to list for free.
-                                    </div>
+                                    <div class="cdm-muted small d-none" id="post-listing-type-hint"></div>
                                 </div>
 
                                 <div class="col-12 col-md-6" id="post-price-wrap">
@@ -4627,7 +5337,20 @@ function listingDetailLayoutEbay(parts) {
         primaryCtaHtml,
         footNoteHtml,
         aboutSectionHtml,
+        saveKey,
     } = parts;
+    const safeKey = saveKey ? escapeAttrForDoubleQuoted(String(saveKey)) : "";
+    const saved = saveKey ? state.savedListingKeys.has(String(saveKey)) : false;
+    const saveBtn = saveKey
+        ? `<button
+                type="button"
+                class="btn btn-sm btn-light cdm-save-btn ${saved ? "cdm-save-btn--on" : ""}"
+                data-action="toggle-save"
+                data-listing-key="${safeKey}"
+                aria-pressed="${saved ? "true" : "false"}"
+                title="${saved ? "Unsave" : "Save"}"
+            >${saved ? "★" : "☆"}</button>`
+        : "";
     return `
       <div class="row g-4 g-lg-5 align-items-start">
         <div class="col-12 col-lg-7">
@@ -4635,7 +5358,10 @@ function listingDetailLayoutEbay(parts) {
         </div>
         <div class="col-12 col-lg-5 cdm-rail">
           <div class="cdm-listing-buybox cdm-card p-4">
-            <h1 class="h3 cdm-title mb-2">${titleHtml}</h1>
+            <div class="d-flex align-items-start justify-content-between gap-3 mb-2">
+              <h1 class="h3 cdm-title mb-0">${titleHtml}</h1>
+              ${saveBtn}
+            </div>
             <p class="cdm-muted small mb-3 mb-lg-4">${subtitleHtml}</p>
             <div class="cdm-listing-price mb-3">${priceHtml}</div>
             ${fulfillmentHtml || ""}
@@ -4858,10 +5584,20 @@ function renderListingDbFromApi(L) {
             ? `<img id="cdm-listing-hero-img" class="cdm-photo-hero cdm-photo-hero--listing" alt="" data-cdm-thumb-fallback="${fb}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
             : `<div class="cdm-listing-gallery-empty text-muted small">No image provided</div>`;
 
-    const sellerStripHtml = `
+    const sellerNumeric = L.sellerId ?? L.SellerId;
+    const sellerId = sellerNumeric != null ? Number(sellerNumeric) : NaN;
+    const sellerName = escapeHtml(L.sellerDisplayName || "—");
+    const sellerStripHtml =
+        Number.isFinite(sellerId) && sellerId > 0
+            ? `
       <div class="cdm-listing-seller-strip mb-3">
         <span class="cdm-listing-seller-label text-muted text-uppercase">Seller</span>
-        <span class="fw-semibold text-dark">${escapeHtml(L.sellerDisplayName || "—")}</span>
+        <button type="button" class="btn btn-link p-0 fw-semibold text-dark text-decoration-none" data-action="view-seller" data-seller-id="${escapeAttrForDoubleQuoted(String(sellerId))}">${sellerName}</button>
+      </div>`
+            : `
+      <div class="cdm-listing-seller-strip mb-3">
+        <span class="cdm-listing-seller-label text-muted text-uppercase">Seller</span>
+        <span class="fw-semibold text-dark">${sellerName}</span>
       </div>`;
 
     const dimensionsRaw = L.dimensions ?? L.Dimensions ?? null;
@@ -4891,7 +5627,6 @@ function renderListingDbFromApi(L) {
         <dd class="col-7 col-sm-8 mb-0">${posted}</dd>
       </dl>`;
 
-    const sellerNumeric = L.sellerId ?? L.SellerId;
     const myUid = parseJwtSub(state.token);
     const isOwnListing =
         myUid != null && sellerNumeric != null && Number(sellerNumeric) === myUid;
@@ -4923,6 +5658,7 @@ function renderListingDbFromApi(L) {
         primaryCtaHtml,
         footNoteHtml,
         aboutSectionHtml,
+        saveKey: `db:${String(L.listingId)}`,
     });
 
     const pickupStartIso =
@@ -4958,8 +5694,8 @@ function renderListingDbFromApi(L) {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -5124,6 +5860,7 @@ function renderListingSyncInner() {
             primaryCtaHtml,
             footNoteHtml,
             aboutSectionHtml,
+            saveKey: state.listingKey || "",
         });
     } else {
         state.lastListingCheckoutSnap = null;
@@ -5135,8 +5872,8 @@ function renderListingSyncInner() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -5228,8 +5965,8 @@ async function renderMyListings() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -5345,8 +6082,8 @@ async function renderDonationDetail() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
                     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavDonationDetail" aria-controls="cdmNavDonationDetail" aria-expanded="false" aria-label="Toggle navigation">
                         <span class="navbar-toggler-icon"></span>
@@ -5520,8 +6257,8 @@ async function renderMyDonations() {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
 
                     <button
@@ -6319,10 +7056,18 @@ function renderTransactionsMounted(rows, opts) {
 function render() {
     if (state.view === "auth") {
         renderAuth();
+    } else if (state.view === "admin-login") {
+        renderAdminLogin();
+    } else if (state.view === "admin") {
+        void renderAdminDashboard();
     } else if (state.view === "post") {
         void renderPost();
     } else if (state.view === "donate-post") {
         void renderDonatePost();
+    } else if (state.view === "saved") {
+        void renderSaved();
+    } else if (state.view === "seller-profile") {
+        void renderSellerProfile();
     } else if (state.view === "my-listings") {
         void renderMyListings();
     } else if (state.view === "my-donations") {
@@ -6333,13 +7078,11 @@ function render() {
         void renderListing();
     } else if (state.view === "profile") {
         void renderProfile();
-    } else if (
-        state.view === "about" ||
-        state.view === "help" ||
-        state.view === "contact" ||
-        state.view === "donations"
-    ) {
+    } else if (state.view === "help" || state.view === "contact" || state.view === "donations") {
         renderStaticSitePage();
+    } else if (state.view === "about") {
+        // About page is intentionally hidden for now.
+        navigate("home");
     } else {
         void renderHome();
     }
@@ -6371,3 +7114,15 @@ if (state.token) {
         if (document.getElementById("auth-nav-slot")) renderAuthNav();
     });
 }
+
+// Global click delegation for auth-slot controls that are injected after initial wiring.
+document.addEventListener("click", (e) => {
+    const t = /** @type {HTMLElement | null} */ (e.target instanceof HTMLElement ? e.target : null);
+    if (!t) return;
+    const adminBtn = t.closest?.("#auth-open-admin");
+    if (adminBtn) {
+        e.preventDefault();
+        navigate("admin-login");
+        return;
+    }
+});
