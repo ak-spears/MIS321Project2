@@ -321,50 +321,17 @@ public sealed class UserRepository
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            "user_id", "campus_id", "email", "phone", "lives_on_campus",
-            "move_in_date", "move_out_date", "dorm_building", "suite_letter", "avatar_url",
-        };
-
-        for (var attempt = 0; attempt < 32; attempt++)
-        {
-            await using var connection = new MySqlConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken);
-
-            var sql = $"""
-                SELECT {string.Join(", ", columns)}
-                FROM users
-                WHERE user_id = @UserId
-                LIMIT 1;
-                """;
-
-            try
-            {
-                await using var cmd = new MySqlCommand(sql, connection);
-                cmd.Parameters.AddWithValue("@UserId", userId);
-
-                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
-                {
-                    return null;
-                }
-
-                return MapProfileFromReader(reader);
-            }
-            catch (Exception ex) when (FindMySqlException(ex) is { } mx && IsBadField(mx) && ParseUnknownColumnName(mx) is { } bad)
-            {
-                if (!TryRemoveSelectableColumn(columns, bad))
-                {
-                    throw;
-                }
-            }
+            return null;
         }
-
-        throw new InvalidOperationException("Could not load profile: too many schema adaptation steps.");
+        
+        return MapProfileFromReader(reader, mode);
     }
 
-    private static UserProfileDto MapProfileFromReader(MySqlDataReader r)
+    private static UserProfileDto MapProfileFromReader(MySqlDataReader r, ProfileGapReadMode mode)
     {
         var email = r.GetString(ColumnIndex(r, "email"));
+        var di = ColumnIndex(r, "display_name");
+        var displayName = di >= 0 && !r.IsDBNull(di) ? r.GetString(di) : DisplayNameFromEmail(email);
 
         var pi = ColumnIndex(r, "phone");
         var li = ColumnIndex(r, "lives_on_campus");
@@ -372,6 +339,7 @@ public sealed class UserRepository
         var mo = ColumnIndex(r, "move_out_date");
         var db = ColumnIndex(r, "dorm_building");
         var sl = ColumnIndex(r, "suite_letter");
+        var ai = ColumnIndex(r, "avatar_url");
         string? suite = null;
         if (sl >= 0 && !r.IsDBNull(sl))
         {
@@ -381,14 +349,15 @@ public sealed class UserRepository
 
         string? defaultGap = null;
         string? preferredReceive = null;
+        var dgi = ColumnIndex(r, "default_gap_solution");
+        var pri = ColumnIndex(r, "preferred_receive_gap");
+        if (mode == ProfileGapReadMode.Full || mode == ProfileGapReadMode.DefaultGapOnly)
+        {
+            defaultGap = dgi >= 0 && !r.IsDBNull(dgi) ? r.GetString(dgi) : null;
+        }
         if (mode == ProfileGapReadMode.Full)
         {
-            defaultGap = reader.IsDBNull(11) ? null : reader.GetString(11);
-            preferredReceive = reader.IsDBNull(12) ? null : reader.GetString(12);
-        }
-        else if (mode == ProfileGapReadMode.DefaultGapOnly)
-        {
-            defaultGap = reader.IsDBNull(11) ? null : reader.GetString(11);
+            preferredReceive = pri >= 0 && !r.IsDBNull(pri) ? r.GetString(pri) : null;
         }
 
         return new UserProfileDto
@@ -396,14 +365,14 @@ public sealed class UserRepository
             UserId = r.GetInt32(ColumnIndex(r, "user_id")),
             CampusId = r.GetInt32(ColumnIndex(r, "campus_id")),
             Email = email,
-            DisplayName = DisplayNameFromEmail(email),
+            DisplayName = displayName,
             Phone = pi >= 0 && !r.IsDBNull(pi) ? r.GetString(pi) : "",
             LivesOnCampus = li >= 0 && !r.IsDBNull(li) && r.GetBoolean(li),
             MoveInDate = mi >= 0 && !r.IsDBNull(mi) ? r.GetDateTime(mi) : DateTime.UtcNow.Date,
             MoveOutDate = mo >= 0 && !r.IsDBNull(mo) ? r.GetDateTime(mo) : null,
             DormBuilding = db >= 0 && !r.IsDBNull(db) ? r.GetString(db) : null,
             SuiteLetter = suite,
-            AvatarUrl = reader.IsDBNull(10) ? null : reader.GetString(10),
+            AvatarUrl = ai >= 0 && !r.IsDBNull(ai) ? r.GetString(ai) : null,
             DefaultGapSolution = defaultGap,
             PreferredReceiveGap = preferredReceive,
         };
@@ -432,10 +401,8 @@ public sealed class UserRepository
 
     public async Task<bool> UpdateProfileAsync(int userId, UpdateUserProfileRequest request, CancellationToken cancellationToken = default)
     {
-        var setColumns = new List<string>
-        {
-            "display_name", "phone", "lives_on_campus", "move_in_date", "move_out_date", "dorm_building", "suite_letter", "avatar_url",
-        };
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
 
         const string sqlFull = """
             UPDATE users
@@ -551,37 +518,8 @@ public sealed class UserRepository
                 string.IsNullOrWhiteSpace(request.PreferredReceiveGap) ? DBNull.Value : request.PreferredReceiveGap.Trim());
         }
 
-            await using var connection = new MySqlConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken);
-
-            var setClause = string.Join(", ", setColumns.Select(c => $"{c} = {ToUpdateParamName(c)}"));
-            var sql = $"""
-                UPDATE users
-                SET {setClause}
-                WHERE user_id = @UserId;
-                """;
-
-            try
-            {
-                await using var cmd = new MySqlCommand(sql, connection);
-                cmd.Parameters.AddWithValue("@UserId", userId);
-                AddUpdateParameters(cmd, setColumns, request);
-                var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
-                return rows > 0;
-            }
-            catch (Exception ex) when (FindMySqlException(ex) is { } umx && IsBadField(umx) && ParseUnknownColumnName(umx) is { } bad)
-            {
-                var i = setColumns.FindIndex(c => string.Equals(c, bad, StringComparison.OrdinalIgnoreCase));
-                if (i < 0)
-                {
-                    throw;
-                }
-
-                setColumns.RemoveAt(i);
-            }
-        }
-
-        return false;
+        var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return rows > 0;
     }
 
     private static string ToUpdateParamName(string column) => column switch
@@ -716,7 +654,7 @@ public sealed class UserRepository
                 await command.ExecuteNonQueryAsync();
                 return true;
             }
-            catch (Exception ex)
+            catch
             {
                 return false;
             }

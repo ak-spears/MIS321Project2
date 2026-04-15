@@ -142,7 +142,7 @@ const LISTINGS_STORAGE_KEY = "cdm_my_listings_v1";
 /** Local-only checkout / claim history until API persists transactions. */
 const TRANSACTIONS_STORAGE_KEY = "cdm_transactions_v1";
 
-/** On paid listings, CDM collects a 7% marketplace fee from sale proceeds (buyer pays list price only). */
+/** On paid listings, Bama Marketplace collects a 7% marketplace fee from sale proceeds (buyer pays list price only). */
 const PLATFORM_FEE_RATE = 0.07;
 
 const state = {
@@ -151,7 +151,7 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
+    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
     view: "home",
     /** `GET /api/listings/{id}` when viewing own donation detail (read-only + QR). */
     donationDetailListingId: /** @type {number | null} */ (null),
@@ -430,7 +430,7 @@ function transactionStatusLabel(status) {
     return status || "In progress";
 }
 
-/** Big friendly status line (CDM ≠ corporate order copy). */
+/** Big friendly status line (Bama Marketplace ≠ corporate order copy). */
 function transactionStatusHeadline(status, kind) {
     const s = String(status || "").toLowerCase();
     const isPurchase = kind === "purchase";
@@ -1251,6 +1251,67 @@ function hydrateMineListingThumbs(root) {
     });
 }
 
+async function hydrateHomeTransactionsPanel(root) {
+    const panel = root?.querySelector?.("#cdm-home-transactions");
+    if (!panel) return;
+    if (!state.token) {
+        panel.innerHTML = "";
+        return;
+    }
+
+    panel.innerHTML = `<div class="cdm-card p-3"><div class="cdm-muted small">Loading purchases…</div></div>`;
+    const { res, data } = await apiJson("/api/transactions/mine?limit=5");
+    if (!res.ok) {
+        if (res.status === 401) {
+            setStoredToken(null);
+            state.token = null;
+            render();
+            return;
+        }
+        panel.innerHTML = `<div class="cdm-card p-3"><div class="cdm-muted small">Couldn’t load purchases right now.</div></div>`;
+        return;
+    }
+
+    const rows = Array.isArray(data) ? data.map(mapServerTransactionToRow) : [];
+    if (rows.length === 0) {
+        panel.innerHTML = `
+          <div class="cdm-card p-3">
+            <div class="fw-semibold mb-1">Your purchases</div>
+            <div class="cdm-muted small mb-2">Nothing yet — claim or buy an item and it’ll show up here.</div>
+            <button type="button" class="btn btn-sm btn-outline-dark" data-action="transactions">View all</button>
+          </div>
+        `;
+        return;
+    }
+
+    const items = rows
+        .slice(0, 5)
+        .map((t) => {
+            const price = t.kind === "claim" ? "Free" : formatUsd(Number(t.amount ?? 0));
+            const status = String(t.status || "").replace(/_/g, " ");
+            return `
+              <div class="d-flex align-items-start justify-content-between gap-2 py-2 border-top">
+                <div class="min-w-0">
+                  <div class="small fw-semibold text-truncate">${escapeHtml(t.title || "Purchase")}</div>
+                  <div class="cdm-muted small text-truncate">${escapeHtml(status)}</div>
+                </div>
+                <div class="small fw-semibold flex-shrink-0">${escapeHtml(price)}</div>
+              </div>
+            `;
+        })
+        .join("");
+
+    panel.innerHTML = `
+      <div class="cdm-card p-3">
+        <div class="d-flex align-items-center justify-content-between gap-2">
+          <div class="fw-semibold">Your purchases</div>
+          <button type="button" class="btn btn-sm btn-outline-dark" data-action="transactions">View all</button>
+        </div>
+        <div class="mt-2">${items}</div>
+      </div>
+    `;
+}
+
 function navigate(view) {
     const leavingDraft =
         (state.view === "post" || state.view === "donate-post") && view !== "post" && view !== "donate-post";
@@ -1697,6 +1758,13 @@ function wireNav(root) {
             navigate("saved");
         });
     });
+    root.querySelectorAll("[data-action='transactions']").forEach((el) => {
+        el.addEventListener("click", (e) => {
+            e.preventDefault();
+            if (!requireAuth({ type: "navigate", view: "transactions" })) return;
+            navigateTransactions();
+        });
+    });
     syncSavedCountBadges(root);
     root.querySelectorAll("[data-action='post-item']").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -1805,6 +1873,25 @@ function wireNav(root) {
 }
 
 function wireTradeActions(root) {
+    root.querySelectorAll("[data-action='buy-item']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const snap = state.lastListingCheckoutSnap;
+            const key = btn.getAttribute("data-listing-key") ?? snap?.listingKey ?? state.listingKey ?? "";
+            if (!requireAuth({ type: "buy", listingKey: String(key) })) return;
+            if (!snap || snap.isMine) return;
+            navigateToCheckout({
+                key: snap.listingKey,
+                title: snap.title,
+                price: snap.price,
+                sellerDisplayName: snap.sellerDisplayName,
+                imageUrl: snap.imageUrl,
+                listingId: snap.listingId,
+                gapSolution: snap.gapSolution ?? null,
+                pickupStart: snap.pickupStart ?? null,
+                pickupEnd: snap.pickupEnd ?? null,
+            });
+        });
+    });
     root.querySelectorAll("[data-action='start-checkout']").forEach((btn) => {
         btn.addEventListener("click", () => {
             const snap = state.lastListingCheckoutSnap;
@@ -4381,7 +4468,8 @@ async function renderHome() {
                                 <button class="btn cdm-btn-crimson" type="button" data-action="post-item">Post an item</button>
                                 ${
                                     state.token
-                                        ? `<button class="btn btn-outline-dark" type="button" data-action="my-listings">My listings</button>`
+                                        ? `<button class="btn btn-outline-dark" type="button" data-action="my-listings">My listings</button>
+                                           <button class="btn btn-outline-dark" type="button" data-action="transactions">My purchases</button>`
                                         : ""
                                 }
                             </div>
@@ -4427,6 +4515,8 @@ async function renderHome() {
                         <aside class="col-12 col-lg-3">
                             <div class="cdm-rail">
                                 ${buildHomeFiltersHtml()}
+
+                                ${state.token ? `<div id="cdm-home-transactions" class="mb-3"></div>` : ""}
 
                                 <div class="cdm-card p-0 overflow-hidden cdm-donations-rail-card">
                                     <a
@@ -4532,7 +4622,7 @@ async function renderHome() {
                                             </div>
                                             <div class="fw-semibold mt-3">Donations + selling</div>
                                             <div class="cdm-muted small mt-1">
-                                                Sellers choose: list for sale or donate. On sales, CDM collects a 7% marketplace fee to the platform.
+                                                Sellers choose: list for sale or donate. On sales, Bama Marketplace collects a 7% marketplace fee to the platform.
                                             </div>
                                         </div>
                                     </div>
@@ -4698,6 +4788,7 @@ async function renderHome() {
     wireHomeQuickCategoryChips(shell);
     wireHomeFeedFilters(shell);
     ensureAuthUi();
+    void hydrateHomeTransactionsPanel(shell);
     hydrateFeedListingImages(shell);
     wireFeedCardButtons(shell);
     wireListingImageFallbacks(shell);
@@ -6456,14 +6547,14 @@ function renderCheckout() {
                 aria-expanded="false"
                 aria-controls="cdmWhyCdmCheckout"
             >
-                <span>Why CDM? Mission &amp; other campuses</span>
+                <span>Why Bama Marketplace? Mission &amp; other campuses</span>
                 <span class="cdm-chevron" aria-hidden="true">▼</span>
             </button>
             <div class="collapse" id="cdmWhyCdmCheckout">
                 <div class="cdm-checkout-mission mt-2 mb-0" role="note">
-                    <strong class="text-body">Why CDM exists.</strong>
+                    <strong class="text-body">Why Bama Marketplace exists.</strong>
                     Each May, residence dumpsters fill with usable twin XL bedding, fridges, microwaves, and furniture, often because there’s no easy way to sell or store until August.
-                    CDM connects <strong>move-out</strong> sellers and donors with <strong>move-in</strong> buyers so those items get reused, not re-bought new three months later.
+                    Bama Marketplace connects <strong>move-out</strong> sellers and donors with <strong>move-in</strong> buyers so those items get reused, not re-bought new three months later.
                 </div>
                 <p class="cdm-checkout-footnote mt-2 mb-0 px-1">
                     <strong>White-label:</strong> Built to run per campus (branding, dorms, locations) on shared infrastructure: UA first, same stack for other schools later.
@@ -6475,7 +6566,7 @@ function renderCheckout() {
     const paymentSummaryNote = `
         <div class="cdm-checkout-payment rounded-3 px-3 py-2 mb-3">
             <strong>Pay the seller</strong> however you both agree: Venmo, Zelle, Cash App, or cash.
-            <span class="d-block small mt-1" style="color:#6e6e73;">CDM doesn’t process payments in-app yet, so sort it in chat.</span>
+            <span class="d-block small mt-1" style="color:#6e6e73;">Bama Marketplace doesn’t process payments in-app yet, so sort it in chat.</span>
         </div>
     `;
 
@@ -6485,7 +6576,7 @@ function renderCheckout() {
                 <h3>Price details</h3>
                 <p>
                     <strong>Your total</strong> is the list price; nothing extra is added at checkout.
-                    CDM still collects a <strong>7% marketplace fee</strong> on paid sales (it goes to the platform); it’s just not stacked on top of what you pay here.
+                    Bama Marketplace still collects a <strong>7% marketplace fee</strong> on paid sales (it goes to the platform); it’s just not stacked on top of what you pay here.
                 </p>
                 <hr class="cdm-checkout-line" />
                 <div class="cdm-checkout-row">
@@ -6507,7 +6598,7 @@ function renderCheckout() {
                 </button>
                 <div class="collapse" id="cdmFeeCompare">
                     <div class="cdm-checkout-disclosure-body">
-                        CDM’s cut is in the lower–mid range vs many resale apps, and the fee funds the app.
+                        Bama Marketplace’s cut is in the lower–mid range vs many resale apps, and the fee funds the app.
                         <ul class="mt-2 mb-0 ps-3">
                             <li>Lots of peer marketplaces land around <strong>10–13%</strong> on sold items.</li>
                             <li>Shipped orders elsewhere often add another <strong>~5–10%</strong> in fees.</li>
@@ -6519,7 +6610,7 @@ function renderCheckout() {
         `
         : `
             <div class="cdm-checkout-panel">
-                <h3>Why claim on CDM</h3>
+                <h3>Why claim on Bama Marketplace</h3>
                 <p>
                     Donations and free listings get the same care as sales: seller’s choice, platform supports both equally.
                     You skip another retail run and give something a second life in the dorms.
@@ -6533,7 +6624,7 @@ function renderCheckout() {
             <h3>Storage (optional)</h3>
             <p>
                 The <strong>three-month gap</strong> (May move-out → August move-in) is exactly when good stuff gets tossed or stored.
-                If your school offers a storage path through CDM, fees may depend on <strong>item size</strong> (larger = more space).
+                If your school offers a storage path through Bama Marketplace, fees may depend on <strong>item size</strong> (larger = more space).
             </p>
             <p class="mb-0">
                 Rates and partners are <strong>TBD</strong>. When your campus turns this on, estimated storage cost will show here before you commit.
@@ -6573,7 +6664,7 @@ function renderCheckout() {
 
     const summaryBadge = isSale
         ? `<div class="cdm-checkout-badge cdm-checkout-badge--warm">Campus sale · seller’s choice</div>`
-        : `<div class="cdm-checkout-badge">Free · donated on CDM</div>`;
+        : `<div class="cdm-checkout-badge">Free · donated on Bama Marketplace</div>`;
 
     const summaryTotalLine = isSale
         ? `<div class="cdm-checkout-row align-items-center mt-3">
@@ -6592,8 +6683,8 @@ function renderCheckout() {
             <nav class="navbar navbar-expand-lg navbar-dark cdm-topbar cdm-navbar-top cdm-checkout-topbar">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
                     <button
                         class="navbar-toggler border border-light border-opacity-50"
@@ -6703,8 +6794,8 @@ function renderCheckoutSuccess() {
             <nav class="navbar navbar-expand-lg navbar-dark cdm-topbar cdm-navbar-top cdm-checkout-topbar">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
                     <button
                         class="navbar-toggler border border-light border-opacity-50"
@@ -6869,9 +6960,9 @@ function renderTransactionsMounted(rows, opts) {
             ? ""
             : `
         <div class="cdm-tx-tip mb-4">
-            <div class="cdm-tx-tip-title">How CDM is different</div>
+            <div class="cdm-tx-tip-title">How Bama Marketplace is different</div>
             <p class="cdm-tx-tip-body mb-0">
-                No trucks, no warehouse: just <strong>campus pickup</strong> and DMs. CDM’s <strong>7%</strong> goes to the <strong>platform</strong>, not added on top of your total. Sellers can <strong>sell or donate</strong>; you always see both the same way here.
+                No trucks, no warehouse: just <strong>campus pickup</strong> and DMs. Bama Marketplace’s <strong>7%</strong> goes to the <strong>platform</strong>, not added on top of your total. Sellers can <strong>sell or donate</strong>; you always see both the same way here.
             </p>
         </div>
     `;
@@ -6947,7 +7038,7 @@ function renderTransactionsMounted(rows, opts) {
                     ? `<div class="cdm-tx-total-pill">${formatUsd(t.listPrice)} <span class="cdm-tx-total-sub">total</span></div>`
                     : `<div class="cdm-tx-total-pill cdm-tx-total-pill--free">$0 <span class="cdm-tx-total-sub">claim</span></div>`;
                 const feeNote = isPurchase
-                    ? `<p class="cdm-tx-footnote mb-0 mt-2">7% to CDM on this sale (not added on top of what you paid).</p>`
+                    ? `<p class="cdm-tx-footnote mb-0 mt-2">7% to Bama Marketplace on this sale (not added on top of what you paid).</p>`
                     : `<p class="cdm-tx-footnote mb-0 mt-2">No fee. Say thanks when you meet up.</p>`;
                 const listingBtn =
                     t.listingKey && String(t.listingKey).trim()
@@ -6991,8 +7082,8 @@ function renderTransactionsMounted(rows, opts) {
             <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top">
                 <div class="container-fluid cdm-max px-3 px-lg-4">
                     <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
-                        <span class="fw-bold">CDM</span>
-                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
                     </a>
                     <button
                         class="navbar-toggler"
@@ -7030,7 +7121,7 @@ function renderTransactionsMounted(rows, opts) {
                     <p class="cdm-tx-demo-note small mb-3">
                         ${
                             opts.serverCount > 0
-                                ? `<strong>${opts.serverCount}</strong> from your account (<code>GET /api/transactions/mine</code>)${opts.hasLocalDemo ? " · plus demo rows in this browser" : ""}.`
+                                ? `<strong>${opts.serverCount}</strong> from your account${opts.hasLocalDemo ? " · plus demo rows in this browser" : ""}.`
                                 : state.token
                                   ? "Server-backed rows appear after you check out a <strong>live listing</strong>. Demo sample cards stay in this browser."
                                   : "Sign in to sync with the database. Demo checkouts (sample feed) stay in this browser."
@@ -7076,6 +7167,12 @@ function render() {
         void renderDonationDetail();
     } else if (state.view === "listing") {
         void renderListing();
+    } else if (state.view === "checkout") {
+        renderCheckout();
+    } else if (state.view === "checkout-success") {
+        renderCheckoutSuccess();
+    } else if (state.view === "transactions") {
+        renderTransactions();
     } else if (state.view === "profile") {
         void renderProfile();
     } else if (state.view === "help" || state.view === "contact" || state.view === "donations") {
