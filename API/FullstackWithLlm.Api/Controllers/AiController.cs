@@ -10,10 +10,12 @@ namespace FullstackWithLlm.Api.Controllers;
 public sealed class AiController : ControllerBase
 {
     private readonly AiListingFromImageService _ai;
+    private readonly AiListingDescriptionService _description;
 
-    public AiController(AiListingFromImageService ai)
+    public AiController(AiListingFromImageService ai, AiListingDescriptionService description)
     {
         _ai = ai;
+        _description = description;
     }
 
     /// <summary>
@@ -64,6 +66,41 @@ public sealed class AiController : ControllerBase
         catch (AiSuggestException ex)
         {
             return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+    }
+
+    [AllowAnonymous]
+    [HttpPost("listing-description")]
+    [ProducesResponseType(typeof(GenerateListingDescriptionResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+    public async Task<ActionResult<GenerateListingDescriptionResponse>> ListingDescription(
+        [FromBody] GenerateListingDescriptionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.ItemName))
+        {
+            return BadRequest("Item name is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Condition))
+        {
+            return BadRequest("Condition is required.");
+        }
+
+        if (request.Price < 0)
+        {
+            return BadRequest("Price cannot be negative.");
+        }
+
+        try
+        {
+            var outDto = await _description.GenerateAsync(request, cancellationToken);
+            return Ok(outDto);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, new { detail = ex.Message });
         }
     }
 

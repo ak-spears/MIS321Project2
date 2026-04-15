@@ -28,3 +28,15 @@ public sealed class AiPileListingsResponseDto
     public List<AiListingSuggestionDto> Listings { get; set; } = new();
 }
 
+public sealed class GenerateListingDescriptionRequest
+{
+    public string ItemName { get; set; } = "";
+    public string Condition { get; set; } = "";
+    public decimal Price { get; set; }
+}
+
+public sealed class GenerateListingDescriptionResponse
+{
+    public string Description { get; set; } = "";
+}
+

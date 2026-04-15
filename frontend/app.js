@@ -6,6 +6,24 @@ const API_BASE =
         ? ""
         : "http://localhost:5147";
 const TOKEN_KEY = "cdm_jwt";
+/** Listing ids (strings) the user marked as handed off for free / donation listings (browser only). */
+const DONATION_HANDOFF_KEY = "cdm_donation_handoff_v1";
+
+function getDonationHandoffCompletedIds() {
+    try {
+        const raw = localStorage.getItem(DONATION_HANDOFF_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? new Set(arr.map(String)) : new Set();
+    } catch {
+        return new Set();
+    }
+}
+
+function markDonationHandoffCompleted(listingId) {
+    const s = getDonationHandoffCompletedIds();
+    s.add(String(listingId));
+    localStorage.setItem(DONATION_HANDOFF_KEY, JSON.stringify([...s]));
+}
 
 function getStoredToken() {
     return localStorage.getItem(TOKEN_KEY);
@@ -25,12 +43,16 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'auth' | 'post' | 'my-listings' | 'listing' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
+    /** @type {'home' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'profile' | 'about' | 'help' | 'contact' | 'donations'} */
     view: "home",
+    /** `GET /api/listings/{id}` when viewing own donation detail (read-only + QR). */
+    donationDetailListingId: /** @type {number | null} */ (null),
     /** Which panel to show on the auth page. */
     authPageMode: /** @type {'login' | 'signup'} */ ("login"),
     listingKey: null,
-    /** @type {null | { type: 'navigate', view: 'post' | 'my-listings' } | { type: 'buy', listingKey: string }} */
+    /**
+     * @type {null | { type: 'navigate', view: 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'profile' } | { type: 'donation-detail', listingId: number } | { type: 'buy', listingKey: string }}
+     */
     afterLoginIntent: null,
     /** Home feed: listing key → image URL (set in JS after fetch; avoids huge src in innerHTML). */
     feedThumbSrcByKey: /** @type {Record<string, string>} */ ({}),
@@ -443,7 +465,7 @@ function homeFeedCardHtml(item) {
             <div class="cdm-card cdm-listing-card">
                 <div class="cdm-listing-thumb">${thumbImg}</div>
                 <div class="p-3">
-                    <div class="fw-semibold">${title}</div>
+                    <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="${key}">${title}</button>
                     <div class="cdm-muted small">${blurb}</div>
                     ${condLine}
                     <div class="mt-2 d-flex align-items-center justify-content-between">
@@ -799,20 +821,40 @@ function hydrateMineListingThumbs(root) {
 }
 
 function navigate(view) {
-    if (state.view === "post" && view !== "post") {
+    const leavingDraft =
+        (state.view === "post" || state.view === "donate-post") && view !== "post" && view !== "donate-post";
+    if (leavingDraft) {
         state.pileListingQueue = null;
         state.pileListingTotal = null;
         state.pileListingIndex = 0;
         state.currentAiCropBox = null;
+    }
+    if (state.view === "donation-detail" && view !== "donation-detail") {
+        state.donationDetailListingId = null;
     }
     if (view === "auth") {
         state.view = "auth";
         render();
         return;
     }
-    if ((view === "post" || view === "my-listings" || view === "profile") && !isAuthed()) {
+    if (
+        (view === "post" ||
+            view === "donate-post" ||
+            view === "my-listings" ||
+            view === "my-donations" ||
+            view === "profile") &&
+        !isAuthed()
+    ) {
         requireAuth({ type: "navigate", view });
         return;
+    }
+    if (view === "donation-detail") {
+        const lid = Number(state.donationDetailListingId);
+        if (!Number.isFinite(lid) || lid <= 0) {
+            state.view = "my-donations";
+            render();
+            return;
+        }
     }
     state.view = view;
     render();
@@ -1100,10 +1142,44 @@ function requireAuth(intent) {
     return false;
 }
 
-/** After login/register: land on home so the feed reloads for the new session. */
+/** After login/register: honor queued navigation (e.g. post, donate flow, my listings) or home. */
 function applyPostAuthNavigation() {
+    const intent = state.afterLoginIntent;
     state.afterLoginIntent = null;
+    if (intent?.type === "donation-detail" && intent.listingId != null) {
+        state.donationDetailListingId = Number(intent.listingId);
+        navigate("donation-detail");
+        return;
+    }
+    if (intent?.type === "navigate" && intent.view) {
+        if (intent.view === "post" || intent.view === "donate-post") {
+            state.editingListingId = null;
+            state.postEditPrefill = null;
+            state.pileListingQueue = null;
+            state.pileListingTotal = null;
+            state.pileListingIndex = 0;
+            state.currentAiCropBox = null;
+        }
+        navigate(intent.view);
+        return;
+    }
     navigate("home");
+}
+
+/**
+ * Open read-only donation detail + drop-off QR (must be the signed-in owner’s free listing).
+ * @param {string | number} listingId
+ */
+function openDonationDetail(listingId) {
+    const id = Number(listingId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    if (!isAuthed()) {
+        state.afterLoginIntent = { type: "donation-detail", listingId: id };
+        navigateAuth("login");
+        return;
+    }
+    state.donationDetailListingId = id;
+    navigate("donation-detail");
 }
 
 /**
@@ -1158,6 +1234,29 @@ function wireNav(root) {
             navigate("post");
         });
     });
+    root.querySelectorAll("[data-action='donate-post']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            if (!isAuthed()) {
+                state.afterLoginIntent = { type: "navigate", view: "donate-post" };
+                navigateAuth("login");
+                return;
+            }
+            state.editingListingId = null;
+            state.postEditPrefill = null;
+            state.pileListingQueue = null;
+            state.pileListingTotal = null;
+            state.pileListingIndex = 0;
+            state.currentAiCropBox = null;
+            navigate("donate-post");
+        });
+    });
+    root.querySelectorAll("[data-action='my-donations']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigate("my-donations");
+        });
+    });
     root.querySelectorAll("[data-action='my-listings']").forEach((btn) => {
         btn.addEventListener("click", () => {
             if (!requireAuth({ type: "navigate", view: "my-listings" })) return;
@@ -1210,6 +1309,43 @@ function wirePostForm(root) {
         prefill != null &&
         eid != null &&
         Number(prefill.listingId ?? prefill.ListingId) === Number(eid);
+
+    function hasExistingEditImage() {
+        if (!isEditing) return false;
+        const ex = prefill?.imageUrl ?? prefill?.ImageUrl;
+        return Boolean(ex && String(ex).trim() !== "");
+    }
+
+    function isPostFormReadyToPublish() {
+        const fd = new FormData(form);
+        const title = String(fd.get("title") || "").trim();
+        const category = String(fd.get("category") || "").trim();
+        const condition = String(fd.get("condition") || "").trim();
+        const description = String(fd.get("description") || "").trim();
+        const gap = String(fd.get("gapSolution") || "").trim();
+        const space = String(fd.get("spaceSuitability") || "").trim();
+        const pRaw = String(fd.get("price") || "").trim();
+        const p = pRaw === "" ? NaN : Number(pRaw);
+        if (!title || !category || !condition || !description || !gap || !space) return false;
+        if (!Number.isFinite(p) || p < 0) return false;
+
+        const listingMode = String(fd.get("listingMode") || "manual");
+        const aiPhotoFile = form.querySelector("#post-ai-photo")?.files?.[0] ?? null;
+        const manualPhotoFile = form.querySelector("#post-photo")?.files?.[0] ?? null;
+
+        if (listingMode === "ai") {
+            if (!aiPhotoFile && !hasExistingEditImage()) return false;
+        } else if (!manualPhotoFile && !hasExistingEditImage()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function syncPostPublishEnabled() {
+        if (!(submitBtn instanceof HTMLButtonElement)) return;
+        submitBtn.disabled = !isPostFormReadyToPublish();
+    }
 
     function setRadio(name, value) {
         if (value == null) return;
@@ -1268,7 +1404,6 @@ function wirePostForm(root) {
         if (s.condition) setValue("condition", s.condition);
         if (s.dimensions) setValue("dimensions", s.dimensions);
         if (s.description) setValue("description", s.description);
-        if (s.listingType) setRadio("listingType", s.listingType);
         if (s.gapSolution) setRadio("gapSolution", s.gapSolution);
         {
             const ss = s.spaceSuitability ?? s.SpaceSuitability;
@@ -1278,14 +1413,20 @@ function wirePostForm(root) {
         if (pref && ["storage", "pickup_window", "ship_or_deliver"].includes(String(pref))) {
             setRadio("gapSolution", pref);
         }
-        if (s.listingType === "sell" && s.price != null && String(s.price).trim() !== "") {
-            setValue("price", String(s.price));
-        }
-        if (s.listingType === "donate") {
-            setValue("price", "");
+        {
+            const lt = String(s.listingType ?? s.ListingType ?? "sell").toLowerCase();
+            if (lt === "donate") {
+                const pr = s.price ?? s.Price;
+                if (pr != null && String(pr).trim() !== "") setValue("price", String(pr));
+                else setValue("price", "0");
+            } else {
+                const pr = s.price ?? s.Price;
+                if (pr != null && String(pr).trim() !== "") setValue("price", String(pr));
+            }
         }
         syncListingType();
         syncGap();
+        syncPostPublishEnabled();
     }
 
     /** Skip is always visible in AI mode; enabled only after Analyze succeeds in pile mode. */
@@ -1353,11 +1494,11 @@ function wirePostForm(root) {
             }
         }
         syncPileSkipControl();
+        syncPostPublishEnabled();
     }
 
     function syncListingType() {
-        const sell = form.querySelector('input[name="listingType"]:checked')?.value === "sell";
-        if (priceWrap) priceWrap.classList.toggle("d-none", !sell);
+        if (priceWrap) priceWrap.classList.remove("d-none");
     }
 
     function syncGap() {
@@ -1366,11 +1507,13 @@ function wirePostForm(root) {
         if (pickupWrap) pickupWrap.classList.toggle("d-none", gap !== "pickup_window");
         const shipGap = gap === "ship_or_deliver" || gap === "donate_unclaimed";
         if (shipDeliverWrap) shipDeliverWrap.classList.toggle("d-none", !shipGap);
+        syncPostPublishEnabled();
     }
 
     form.querySelectorAll('input[name="listingMode"]').forEach((r) => r.addEventListener("change", syncListingMode));
-    form.querySelectorAll('input[name="listingType"]').forEach((r) => r.addEventListener("change", syncListingType));
     form.querySelectorAll('input[name="gapSolution"]').forEach((r) => r.addEventListener("change", syncGap));
+    form.addEventListener("input", syncPostPublishEnabled);
+    form.addEventListener("change", syncPostPublishEnabled);
 
     if (isEditing && prefill) {
         setRadio("listingMode", "manual");
@@ -1382,8 +1525,7 @@ function wirePostForm(root) {
         setValue("dimensions", prefill.dimensions ?? prefill.Dimensions ?? "");
         setValue("description", prefill.description);
         const p = Number(prefill.price);
-        setRadio("listingType", p === 0 ? "donate" : "sell");
-        setValue("price", p === 0 ? "" : String(prefill.price));
+        setValue("price", Number.isFinite(p) ? String(prefill.price) : "");
         const gapRaw = prefill.gapSolution ?? prefill.GapSolution ?? "storage";
         const gapVal = gapRaw === "donate_unclaimed" ? "ship_or_deliver" : gapRaw;
         setRadio("gapSolution", gapVal);
@@ -1394,11 +1536,20 @@ function wirePostForm(root) {
         setValue("deliveryNotes", prefill.deliveryNotes);
         const ssRaw = prefill.spaceSuitability ?? prefill.SpaceSuitability ?? "any_space";
         setRadio("spaceSuitability", String(ssRaw).trim() === "small_dorm" ? "small_dorm" : "any_space");
+        const ltEl = form.querySelector("#post-listing-type");
+        if (ltEl instanceof HTMLInputElement) ltEl.value = "sell";
+    }
+
+    const hintEl = root.querySelector("#post-listing-type-hint");
+    if (hintEl) {
+        hintEl.innerHTML =
+            "Selling: 7% platform fee on the seller side (policy — not charged in this draft). Use <strong>Donations</strong> in the nav to create a free listing.";
     }
 
     syncListingMode();
     syncListingType();
     syncGap();
+    syncPostPublishEnabled();
 
     root.querySelectorAll("[data-action='cancel-edit-listing']").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -1549,10 +1700,10 @@ function wirePostForm(root) {
             moveOutDate: null,
             donateIfUnclaimed: false,
         };
-        if (draft.listingType === "sell") {
+        {
             const p = draft.price != null && String(draft.price).trim() !== "" ? Number(draft.price) : NaN;
             if (!Number.isFinite(p) || p < 0) {
-                alert("Add a valid price for selling, or choose Donate (free).");
+                alert("Add a valid price (USD).");
                 return;
             }
         }
@@ -1575,7 +1726,7 @@ function wirePostForm(root) {
         const payload = {
             title: String(draft.title || "").trim(),
             description: String(draft.description || "").trim() || null,
-            price: draft.listingType === "donate" ? 0 : Number(draft.price),
+            price: Number(draft.price),
             category: draft.category ? String(draft.category).trim() : null,
             condition: draft.condition ? String(draft.condition).trim() : null,
             dimensions: draft.dimensions ? String(draft.dimensions).trim() : null,
@@ -1592,8 +1743,8 @@ function wirePostForm(root) {
             alert("Title is required.");
             return;
         }
-        if (draft.listingType === "sell" && (!Number.isFinite(payload.price) || payload.price < 0)) {
-            alert("Add a valid price for selling, or choose Donate (free).");
+        if (!Number.isFinite(payload.price) || payload.price < 0) {
+            alert("Add a valid price (USD).");
             return;
         }
 
@@ -1641,6 +1792,706 @@ function wirePostForm(root) {
     }
 }
 
+/** Shown when the donation form has no description field — stored on the listing for the detail page. */
+const DONATION_DEFAULT_DESCRIPTION =
+    "Free dorm donation — bring this item to the marked campus drop-off location and show the donation QR.";
+
+/** JSON string encoded in the drop-off QR — admin tools can parse `listingId` or full payload after scan. */
+function buildDonationDropoffQrPayload(listingId) {
+    return JSON.stringify({
+        v: 1,
+        kind: "cdm_donation_dropoff",
+        listingId: Number(listingId),
+    });
+}
+
+/** Allowed condition keys for donations: fair or better (see UI copy). */
+const DONATION_CONDITION_RANK = /** @type {Record<string, number>} */ ({
+    fair: 1,
+    good: 2,
+    like_new: 3,
+    new: 4,
+});
+
+/** Normalize API/AI/user text to `new` | `like_new` | `good` | `fair` or "". */
+function parseConditionToDonationKey(raw) {
+    if (raw == null || String(raw).trim() === "") return "";
+    let k = String(raw)
+        .trim()
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_");
+    const direct = ["new", "like_new", "good", "fair"];
+    if (direct.includes(k)) return k;
+    if (k.includes("like") && k.includes("new")) return "like_new";
+    if (k === "unused" || k === "brand_new" || k === "new_unused") return "new";
+    return "";
+}
+
+function isDonationEligibleConditionKey(k) {
+    const r = DONATION_CONDITION_RANK[k];
+    return typeof r === "number" && r >= DONATION_CONDITION_RANK.fair;
+}
+
+/** Inner `<option>` list for listing category (same set as seller post). */
+function listingCategorySelectOptionsHtml() {
+    return `
+        <option value="" selected disabled>Select…</option>
+        <option value="bedding">Bedding (twin XL)</option>
+        <option value="appliance">Appliances (mini-fridge, microwave)</option>
+        <option value="furniture">Furniture / desk</option>
+        <option value="storage">Storage / organizers</option>
+        <option value="lighting">Lighting</option>
+        <option value="textbooks">Textbooks</option>
+        <option value="cookware">Cookware & cooking supplies</option>
+        <option value="decor">Decor</option>
+        <option value="electronics">Electronics</option>
+        <option value="other">Other</option>
+    `;
+}
+
+async function renderDonatePost() {
+    const root = document.getElementById("app");
+    if (state.editingListingId != null) {
+        const id = state.editingListingId;
+        const cached = state.postEditPrefill;
+        const lid = cached?.listingId ?? cached?.ListingId;
+        if (!cached || Number(lid) !== Number(id)) {
+            root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading listing…</div></div>`;
+            const { res, data } = await apiJson(`/api/listings/${encodeURIComponent(id)}`);
+            if (!res.ok) {
+                const msg =
+                    typeof data === "string"
+                        ? data
+                        : data?.detail || data?.title || `Could not load listing (HTTP ${res.status}).`;
+                alert(msg);
+                state.editingListingId = null;
+                state.postEditPrefill = null;
+                navigate("my-listings");
+                return;
+            }
+            const myId = parseJwtSub(state.token);
+            const sid = data.sellerId ?? data.SellerId;
+            if (myId != null && sid != null && Number(sid) !== myId) {
+                alert("You can only edit your own listings.");
+                state.editingListingId = null;
+                state.postEditPrefill = null;
+                navigate("my-listings");
+                return;
+            }
+            const p = Number(data.price);
+            if (!Number.isFinite(p) || p !== 0) {
+                alert("This form is for free donation listings only.");
+                state.editingListingId = null;
+                state.postEditPrefill = null;
+                navigate("post");
+                return;
+            }
+            state.postEditPrefill = data;
+            render();
+            return;
+        }
+    } else {
+        state.postEditPrefill = null;
+    }
+
+    const isEdit = Boolean(state.editingListingId && state.postEditPrefill);
+    root.innerHTML = "";
+
+    const shell = el(`
+        <div class="cdm-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+
+                    <button
+                        class="navbar-toggler"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavDonatePost"
+                        aria-controls="cdmNavDonatePost"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+
+                    <div class="collapse navbar-collapse" id="cdmNavDonatePost">
+                        ${topNavPrimaryLinksHtml(null)}
+
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                            <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <div class="body-content cdm-body-content">
+                <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    ${
+                        state.token
+                            ? `<button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="my-donations">
+                        ← My donations
+                    </button>`
+                            : `<button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="nav-donations">
+                        ← Donations
+                    </button>`
+                    }
+
+                    <div class="cdm-surface p-4 p-lg-5 mt-2">
+                        ${
+                            isEdit
+                                ? `<div class="alert alert-warning mb-3" id="donate-edit-banner">
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                <div>
+                                    <div class="fw-semibold">Editing a donation listing</div>
+                                    <div class="small">This stays a free listing. Use <strong>Post an item</strong> in the nav for paid sales.</div>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-outline-dark" data-action="cancel-edit-donation">Cancel editing</button>
+                            </div>
+                        </div>`
+                                : ""
+                        }
+                        <h1 class="h3 cdm-title mb-2" id="donate-title-text">${isEdit ? "Edit donation" : "Donate an item"}</h1>
+                        <p class="cdm-muted mb-4" id="donate-subtitle-text">
+                            ${
+                                isEdit
+                                    ? "Update your free listing. It stays at $0 for other students."
+                                    : "List something for free. Items must be <strong>fair condition or better</strong>. You can enter details manually or use AI from a photo."
+                            }
+                        </p>
+
+                        <form id="donation-draft-form" class="cdm-card p-4 p-lg-4">
+                            <div class="row g-3">
+                                ${
+                                    isEdit
+                                        ? `<div class="col-12">
+                                    <label class="form-label fw-semibold" for="donation-photo">Photo</label>
+                                    <input class="form-control" type="file" id="donation-photo" name="photo" accept="image/*" />
+                                    <div class="cdm-muted small mt-1">Optional — leave empty to keep the current photo. Images are compressed before upload.</div>
+                                </div>`
+                                        : `<div class="col-12">
+                                    <div class="border rounded-3 p-3 bg-white">
+                                        <span class="fw-semibold d-block mb-2">Listing mode</span>
+                                        <div class="d-flex flex-wrap gap-3 align-items-start">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="donationListingMode" id="dm-manual" value="manual" checked />
+                                                <label class="form-check-label" for="dm-manual">Enter details manually</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="donationListingMode" id="dm-ai" value="ai" />
+                                                <label class="form-check-label" for="dm-ai">Donate with AI — photo → analyze item</label>
+                                            </div>
+                                        </div>
+                                        <p class="cdm-muted small mb-0 mt-2">
+                                            AI mode suggests title, category, condition, and dimensions from your photo. You must review everything before publishing — donations only accept <strong>fair condition or better</strong>.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 d-none" id="donation-ai-panel">
+                                    <div class="rounded-3 p-3 cdm-ai-panel">
+                                        <div class="fw-semibold mb-2">Snap &amp; donate</div>
+                                        <p class="cdm-muted small mb-3">
+                                            Take a clear photo of one item, or a <strong>pile</strong> of several. Turn on pile mode before <strong>Analyze photo</strong> to get one draft per item (publish each donation separately).
+                                        </p>
+                                        <label class="form-label small" for="donation-ai-photo">Photo</label>
+                                        <input class="form-control form-control-sm mb-2" type="file" id="donation-ai-photo" name="donationAiPhoto" accept="image/*" capture="environment" />
+                                        <div class="cdm-pile-mode-box mb-3" role="group" aria-labelledby="donation-ai-pile-label">
+                                            <div class="d-flex gap-3 align-items-start">
+                                                <input
+                                                    class="form-check-input cdm-pile-mode-check flex-shrink-0"
+                                                    type="checkbox"
+                                                    id="donation-ai-pile"
+                                                    name="donationAiPileMode"
+                                                />
+                                                <div class="flex-grow-1 min-w-0">
+                                                    <label class="form-check-label d-block mb-1" for="donation-ai-pile" id="donation-ai-pile-label">
+                                                        <span class="cdm-pile-mode-title">Pile mode</span>
+                                                        <span class="badge rounded-pill ms-2 align-middle fw-normal border bg-white text-secondary">Optional</span>
+                                                    </label>
+                                                    <p class="small cdm-muted mb-0">Multiple items → one draft per item. Enable before Analyze.</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                                            <button type="button" class="btn btn-sm btn-outline-dark" id="donation-ai-analyze-btn">Analyze photo</button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="donation-ai-pile-skip-btn" disabled>Skip (don’t post)</button>
+                                            <span class="small cdm-muted" id="donation-ai-status"></span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col-12" id="donation-manual-listing-photo-wrap">
+                                    <label class="form-label fw-semibold" for="donation-photo">Listing photo</label>
+                                    <input class="form-control" type="file" id="donation-photo" name="photo" accept="image/*" required />
+                                    <div class="cdm-muted small mt-1">Compresses before upload. Use a clear photo of the item.</div>
+                                </div>`
+                                }
+
+                                <div class="col-12">
+                                    <label class="form-label fw-semibold" for="donation-title">Title</label>
+                                    <input class="form-control" id="donation-title" name="title" type="text" required placeholder="e.g., Desk lamp" maxlength="200" />
+                                </div>
+
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-semibold" for="donation-category">Category</label>
+                                    <select class="form-select" id="donation-category" name="category" required>
+                                        ${listingCategorySelectOptionsHtml()}
+                                    </select>
+                                </div>
+
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label fw-semibold" for="donation-condition">Condition</label>
+                                    <select class="form-select" id="donation-condition" name="condition" required>
+                                        <option value="" selected disabled>Select…</option>
+                                        <option value="new">New / unused</option>
+                                        <option value="like_new">Like new</option>
+                                        <option value="good">Good</option>
+                                        <option value="fair">Fair (minimum for donations)</option>
+                                    </select>
+                                    <div class="cdm-muted small mt-1">Only <strong>fair, good, like new,</strong> or <strong>new</strong> — not broken, stained, or unsafe.</div>
+                                </div>
+
+                                <div class="col-12">
+                                    <label class="form-label fw-semibold" for="donation-dimensions">Dimensions (optional)</label>
+                                    <input class="form-control" id="donation-dimensions" name="dimensions" type="text" placeholder='e.g., 18" W × 20" D × 34" H' />
+                                </div>
+
+                                <div class="col-12">
+                                    <div class="cdm-muted small">
+                                        Drop-off is handled at the designated campus location after you publish this donation.
+                                    </div>
+                                </div>
+
+                                <div class="col-12">
+                                    <button type="submit" class="btn cdm-btn-crimson" id="donation-submit-btn">${isEdit ? "Save changes" : "Publish donation"}</button>
+                                    <button type="reset" class="btn btn-outline-secondary ms-2">Reset</button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(root);
+    ensureAuthUi();
+    wireDonationForm(root);
+}
+
+function wireDonationForm(root) {
+    const form = root.querySelector("#donation-draft-form");
+    if (!form) return;
+
+    const prefill = state.postEditPrefill;
+    const eid = state.editingListingId;
+    const isEditing =
+        prefill != null &&
+        eid != null &&
+        Number(prefill.listingId ?? prefill.ListingId) === Number(eid);
+    const submitBtn = root.querySelector("#donation-submit-btn");
+
+    const aiPanel = root.querySelector("#donation-ai-panel");
+    const manualListingPhotoWrap = root.querySelector("#donation-manual-listing-photo-wrap");
+
+    function hasExistingEditImage() {
+        if (!isEditing) return false;
+        const ex = prefill?.imageUrl ?? prefill?.ImageUrl;
+        return Boolean(ex && String(ex).trim() !== "");
+    }
+
+    function isDonationFormReadyToPublish() {
+        const fd = new FormData(form);
+        const title = String(fd.get("title") || "").trim();
+        const category = String(fd.get("category") || "").trim();
+        const condKey = parseConditionToDonationKey(fd.get("condition"));
+        if (!title || !category || !isDonationEligibleConditionKey(condKey)) return false;
+
+        const listingMode = isEditing ? "manual" : String(fd.get("donationListingMode") || "manual");
+        const aiPhotoFile = form.querySelector("#donation-ai-photo")?.files?.[0] ?? null;
+        const manualPhotoFile = form.querySelector("#donation-photo")?.files?.[0] ?? null;
+        if (listingMode === "ai") {
+            if (!aiPhotoFile && !hasExistingEditImage()) return false;
+        } else if (!manualPhotoFile && !hasExistingEditImage()) {
+            return false;
+        }
+        return true;
+    }
+
+    function syncDonationPublishEnabled() {
+        if (!(submitBtn instanceof HTMLButtonElement)) return;
+        submitBtn.disabled = !isDonationFormReadyToPublish();
+    }
+
+    function setValue(name, value) {
+        const el = form.querySelector(`[name="${CSS.escape(String(name))}"]`);
+        if (!el) return;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+            el.value = value == null ? "" : String(value);
+        }
+    }
+
+    function setAiStatus(msg) {
+        const el = root.querySelector("#donation-ai-status");
+        if (el) el.textContent = msg || "";
+    }
+
+    /** Maps AI output to donation fields + crop box; enforces fair+ condition. */
+    function applyDonationAiSuggestion(s) {
+        if (!s || typeof s !== "object") return;
+        state.currentAiCropBox = null;
+        const num = (x) => {
+            if (typeof x === "number" && Number.isFinite(x)) return x;
+            if (x == null || x === "") return NaN;
+            const n = Number(x);
+            return Number.isFinite(n) ? n : NaN;
+        };
+        const cl = num(s.cropLeft ?? s.CropLeft);
+        const ct = num(s.cropTop ?? s.CropTop);
+        const cw = num(s.cropWidth ?? s.CropWidth);
+        const ch = num(s.cropHeight ?? s.CropHeight);
+        if ([cl, ct, cw, ch].every((v) => Number.isFinite(v))) {
+            state.currentAiCropBox = { left: cl, top: ct, width: cw, height: ch };
+        } else {
+            state.currentAiCropBox = null;
+        }
+        const pileN = state.pileListingTotal;
+        if (pileN != null && pileN >= 2) {
+            const cur = state.currentAiCropBox;
+            if (!cur || isNearFullFrameAiCrop(cur)) {
+                const idx = state.pileListingIndex;
+                const fb = pileGridCropBox(idx, pileN);
+                if (fb) state.currentAiCropBox = fb;
+            }
+        }
+        if (s.title) setValue("title", s.title);
+        if (s.category) setValue("category", s.category);
+        if (s.dimensions) setValue("dimensions", s.dimensions);
+        if (s.condition != null && String(s.condition).trim() !== "") {
+            const ck = parseConditionToDonationKey(s.condition);
+            if (isDonationEligibleConditionKey(ck)) {
+                setValue("condition", ck);
+            } else {
+                setValue("condition", "");
+                setAiStatus(
+                    "AI condition wasn’t fair+ — pick New, Like new, Good, or Fair (minimum for donations).",
+                );
+            }
+        }
+        syncDonationPublishEnabled();
+    }
+
+    function syncPileSkipControl() {
+        const btn = form.querySelector("#donation-ai-pile-skip-btn");
+        if (!btn) return;
+        const pileActive = state.pileListingTotal != null && state.pileListingTotal >= 1;
+        btn.disabled = !pileActive;
+        btn.title = pileActive
+            ? "Skip this draft without posting (go to next item if any)."
+            : "Run Analyze with Pile mode on first — then you can skip drafts without posting.";
+    }
+
+    function updatePileStatus() {
+        const t = state.pileListingTotal;
+        const i = state.pileListingIndex;
+        const q = state.pileListingQueue?.length ?? 0;
+        if (t == null || t < 1) {
+            setAiStatus("");
+            syncPileSkipControl();
+            return;
+        }
+        setAiStatus(
+            `Item ${i} of ${t} (same photo). ${q} more queued — publish donation, or Skip to drop this draft.`,
+        );
+        syncPileSkipControl();
+    }
+
+    function skipDonationPileDraft() {
+        if (state.pileListingTotal == null) return;
+        if (state.pileListingQueue && state.pileListingQueue.length > 0) {
+            state.pileListingIndex += 1;
+            const next = /** @type {Record<string, unknown>} */ (state.pileListingQueue.shift());
+            applyDonationAiSuggestion(next);
+            updatePileStatus();
+            return;
+        }
+        state.pileListingQueue = null;
+        state.pileListingTotal = null;
+        state.pileListingIndex = 0;
+        state.currentAiCropBox = null;
+        setAiStatus("Skipped — nothing was posted for that draft.");
+        syncPileSkipControl();
+    }
+
+    function syncDonationListingMode() {
+        const ai = form.querySelector('input[name="donationListingMode"]:checked')?.value === "ai";
+        if (aiPanel) aiPanel.classList.toggle("d-none", !ai);
+        if (manualListingPhotoWrap) manualListingPhotoWrap.classList.toggle("d-none", ai);
+        const photoInput = form.querySelector("#donation-photo");
+        if (photoInput instanceof HTMLInputElement) {
+            if (ai) {
+                photoInput.removeAttribute("required");
+                photoInput.value = "";
+            } else {
+                photoInput.setAttribute("required", "");
+            }
+        }
+        syncPileSkipControl();
+        syncDonationPublishEnabled();
+    }
+
+    if (isEditing && prefill) {
+        setValue("title", prefill.title);
+        setValue("category", prefill.category);
+        let ck = parseConditionToDonationKey(prefill.condition ?? prefill.Condition ?? "good");
+        if (!isDonationEligibleConditionKey(ck)) ck = "fair";
+        setValue("condition", ck);
+        setValue("dimensions", prefill.dimensions ?? prefill.Dimensions ?? "");
+    }
+
+    if (!isEditing) {
+        form.querySelectorAll('input[name="donationListingMode"]').forEach((r) =>
+            r.addEventListener("change", syncDonationListingMode),
+        );
+        syncDonationListingMode();
+
+        const aiAnalyzeBtn = form.querySelector("#donation-ai-analyze-btn");
+        if (aiAnalyzeBtn) {
+            aiAnalyzeBtn.addEventListener("click", async () => {
+                const aiPhotoInput = form.querySelector("#donation-ai-photo");
+                const f = aiPhotoInput?.files?.[0] ?? null;
+                if (!f) {
+                    alert("AI mode: pick a photo first.");
+                    return;
+                }
+                const pileOn = form.querySelector("#donation-ai-pile")?.checked === true;
+                setAiStatus(pileOn ? "Analyzing (pile mode)…" : "Analyzing…");
+                aiAnalyzeBtn.disabled = true;
+                try {
+                    const body = new FormData();
+                    body.append("image", f, f.name || "image.jpg");
+                    body.append("pile", pileOn ? "true" : "false");
+                    const res = await fetch(`${API_BASE}/api/ai/listing-from-image`, {
+                        method: "POST",
+                        body,
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        const msg =
+                            typeof data === "string"
+                                ? data
+                                : data?.detail || data?.title || `AI analyze failed (HTTP ${res.status}).`;
+                        setAiStatus("");
+                        alert(msg);
+                        return;
+                    }
+                    const listingsRaw = data.listings ?? data.Listings;
+                    if (pileOn) {
+                        if (!listingsRaw || !Array.isArray(listingsRaw) || listingsRaw.length === 0) {
+                            setAiStatus("");
+                            alert(
+                                "Pile mode: the server didn’t return a listings array. Try again, or analyze without pile mode.",
+                            );
+                            return;
+                        }
+                        state.pileListingTotal = listingsRaw.length;
+                        state.pileListingQueue = listingsRaw.slice(1);
+                        state.pileListingIndex = 1;
+                        applyDonationAiSuggestion(listingsRaw[0]);
+                        updatePileStatus();
+                    } else {
+                        state.pileListingTotal = null;
+                        state.pileListingQueue = null;
+                        state.pileListingIndex = 0;
+                        applyDonationAiSuggestion(data);
+                        setAiStatus("Suggestions applied — confirm condition is fair or better, then publish.");
+                        syncPileSkipControl();
+                    }
+                } catch (err) {
+                    console.error(err);
+                    setAiStatus("");
+                    alert("AI analyze failed — is the API running?");
+                } finally {
+                    aiAnalyzeBtn.disabled = false;
+                }
+            });
+        }
+
+        form.querySelector("#donation-ai-pile-skip-btn")?.addEventListener("click", () => skipDonationPileDraft());
+
+        if (state.pileListingTotal != null) {
+            updatePileStatus();
+        } else {
+            syncPileSkipControl();
+        }
+    }
+
+    form.addEventListener("input", syncDonationPublishEnabled);
+    form.addEventListener("change", syncDonationPublishEnabled);
+    syncDonationPublishEnabled();
+
+    root.querySelectorAll("[data-action='cancel-edit-donation']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            state.editingListingId = null;
+            state.postEditPrefill = null;
+            navigate("my-listings");
+        });
+    });
+
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (!state.token) {
+            alert("Sign in to publish.");
+            return;
+        }
+
+        const fd = new FormData(form);
+        const listingMode = isEditing ? "manual" : String(fd.get("donationListingMode") || "manual");
+        const aiPhotoInput = form.querySelector("#donation-ai-photo");
+        const aiPhotoFile = aiPhotoInput?.files?.[0];
+        const listingPhotoInput = form.querySelector("#donation-photo");
+        const listingPhotoFile = listingPhotoInput?.files?.[0] ?? aiPhotoFile ?? null;
+
+        const editingNow =
+            state.editingListingId != null &&
+            state.postEditPrefill &&
+            Number(state.postEditPrefill.listingId ?? state.postEditPrefill.ListingId) === Number(state.editingListingId);
+
+        if (!listingPhotoFile) {
+            if (!editingNow) {
+                alert("Add a listing photo.");
+                return;
+            }
+            const ex = state.postEditPrefill?.imageUrl ?? state.postEditPrefill?.ImageUrl;
+            if (!ex || String(ex).trim() === "") {
+                alert("Add a listing photo.");
+                return;
+            }
+        }
+
+        if (listingMode === "ai" && !editingNow && !aiPhotoFile) {
+            alert("AI donation mode: add a photo in the Snap & donate section first (or switch to manual).");
+            return;
+        }
+
+        let photoDataUrl = null;
+        if (listingPhotoFile) {
+            try {
+                photoDataUrl = await compressImageFileToJpegDataUrl(listingPhotoFile, 1600, 0.86);
+                if (
+                    listingMode === "ai" &&
+                    state.currentAiCropBox &&
+                    photoDataUrl &&
+                    shouldApplyAiCrop(state.currentAiCropBox)
+                ) {
+                    try {
+                        photoDataUrl = await cropDataUrlToNormalizedJpeg(
+                            photoDataUrl,
+                            state.currentAiCropBox,
+                            1600,
+                            0.86,
+                        );
+                    } catch {
+                        /* keep uncropped */
+                    }
+                }
+            } catch {
+                alert("Couldn’t read the selected image. Try a different file.");
+                return;
+            }
+        }
+
+        let imageUrl = photoDataUrl;
+        if (!imageUrl && editingNow) {
+            imageUrl = String(state.postEditPrefill?.imageUrl ?? state.postEditPrefill?.ImageUrl ?? "").trim();
+        }
+        if (imageUrl && String(imageUrl).startsWith("data:image/")) {
+            try {
+                imageUrl = await shrinkListingImageDataUrlForUpload(imageUrl);
+            } catch {
+                /* keep */
+            }
+        }
+
+        const title = String(fd.get("title") || "").trim();
+        if (!title) {
+            alert("Title is required.");
+            return;
+        }
+
+        const condKey = parseConditionToDonationKey(fd.get("condition"));
+        if (!isDonationEligibleConditionKey(condKey)) {
+            alert("Donations must be in fair condition or better. Choose New, Like new, Good, or Fair.");
+            return;
+        }
+
+        const descExisting =
+            isEditing && prefill ? String(prefill.description ?? prefill.Description ?? "").trim() : "";
+        const description = descExisting || DONATION_DEFAULT_DESCRIPTION;
+
+        /** @type {Record<string, unknown>} */
+        const payload = {
+            title,
+            description,
+            price: 0,
+            category: fd.get("category") ? String(fd.get("category")).trim() : null,
+            condition: condKey,
+            dimensions: fd.get("dimensions") ? String(fd.get("dimensions")).trim() : null,
+            gapSolution: "storage",
+            spaceSuitability: "any_space",
+            storageNotes: null,
+            pickupStart: null,
+            pickupEnd: null,
+            pickupLocation: null,
+            deliveryNotes: null,
+            imageUrl,
+        };
+
+        const path = editingNow ? `/api/listings/${state.editingListingId}` : "/api/listings";
+        const method = editingNow ? "PUT" : "POST";
+        const { res, data } = await apiJson(path, {
+            method,
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const msg =
+                typeof data === "string"
+                    ? data
+                    : data?.detail || data?.title || `Could not ${editingNow ? "update" : "post"} donation (HTTP ${res.status}).`;
+            alert(msg);
+            return;
+        }
+
+        if (
+            !editingNow &&
+            state.pileListingQueue &&
+            Array.isArray(state.pileListingQueue) &&
+            state.pileListingQueue.length > 0
+        ) {
+            state.pileListingIndex += 1;
+            const next = /** @type {Record<string, unknown>} */ (state.pileListingQueue.shift());
+            applyDonationAiSuggestion(next);
+            updatePileStatus();
+            console.log("Posted donation; loading next pile item:", data);
+            return;
+        }
+
+        state.editingListingId = null;
+        state.postEditPrefill = null;
+        state.pileListingQueue = null;
+        state.pileListingTotal = null;
+        state.pileListingIndex = 0;
+        state.currentAiCropBox = null;
+        console.log(editingNow ? "Updated donation (API):" : "Posted donation (API):", data);
+        navigate("my-donations");
+    });
+}
+
 function renderStaticSitePage() {
     const root = document.getElementById("app");
     const page = state.view;
@@ -1661,8 +2512,98 @@ function renderStaticSitePage() {
         },
         donations: {
             title: "Donations",
-            html: `<p class="mb-3">Support reuse on campus: share this marketplace with your hall, RA staff, and student orgs so fewer usable items end up in dumpsters during move-out.</p>
-                <p class="mb-0">If you run a fund drive or nonprofit tie-in, add your payment or volunteer link here when you wire up payments.</p>`,
+            html: `
+                <div class="cdm-donations-explainer-head text-center text-lg-start mb-4">
+                    <p class="lead mb-0">
+                        Got something in good shape you do not need anymore? Post it for free, keep an eye on it in <strong>My donations</strong>, and pull up your drop-off QR when you are ready to bring it in.
+                    </p>
+                </div>
+                <div class="cdm-donations-flow-graphic mb-4 mb-lg-5 rounded-4 overflow-hidden border" aria-hidden="true">
+                    <svg class="cdm-donations-flow-svg" viewBox="0 0 920 220" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <linearGradient id="cdmDonBg2" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#fff6f8" />
+                                <stop offset="100%" style="stop-color:#f8fafc" />
+                            </linearGradient>
+                        </defs>
+                        <rect width="920" height="220" fill="url(#cdmDonBg2)" />
+
+                        <g fill="#7f1528" font-family="system-ui,sans-serif" font-size="18" font-weight="700" text-anchor="middle">
+                            <text x="120" y="42">1 · List Item</text>
+                            <text x="340" y="42">2 · Publish</text>
+                            <text x="560" y="42">3 · Open QR</text>
+                            <text x="780" y="42">4 · Drop Off</text>
+                        </g>
+
+                        <g stroke="#9e1b32" stroke-width="3" stroke-linecap="round" opacity="0.38" fill="none">
+                            <path d="M196 118 L264 118" />
+                            <path d="M416 118 L484 118" />
+                            <path d="M636 118 L704 118" />
+                        </g>
+                        <g fill="#9e1b32" opacity="0.72">
+                            <path d="M258 118 l-9 -7 v14z" />
+                            <path d="M478 118 l-9 -7 v14z" />
+                            <path d="M698 118 l-9 -7 v14z" />
+                        </g>
+
+                        <g transform="translate(0,58)">
+                            <rect x="66" y="18" width="108" height="96" rx="16" fill="#ffffff" stroke="#e5e7eb" stroke-width="2" />
+                            <circle cx="120" cy="66" r="22" fill="#fee2e8" stroke="#9e1b32" stroke-width="2.2" />
+                            <path d="M109 66 l8 8 15-16" stroke="#9e1b32" stroke-width="3" fill="none" stroke-linecap="round" />
+
+                            <rect x="286" y="18" width="108" height="96" rx="16" fill="#ffffff" stroke="#e5e7eb" stroke-width="2" />
+                            <rect x="312" y="43" width="56" height="45" rx="8" fill="#fdf2f8" stroke="#e11d48" stroke-width="1.4" />
+                            <path d="M322 52 h36 M322 60 h36 M322 68 h28" stroke="#9e1b32" stroke-width="2" stroke-linecap="round" />
+                            <circle cx="352" cy="84" r="5.2" fill="#16a34a" />
+                            <path d="M349 84 l2 2 4-5" stroke="#ffffff" stroke-width="1.7" fill="none" stroke-linecap="round" />
+
+                            <rect x="506" y="18" width="108" height="96" rx="16" fill="#ffffff" stroke="#e5e7eb" stroke-width="2" />
+                            <rect x="531" y="40" width="58" height="52" rx="6" fill="#f8fafc" stroke="#d1d5db" stroke-width="1.4" />
+                            <g fill="#111827">
+                                <rect x="538" y="47" width="6" height="6" /><rect x="550" y="47" width="6" height="6" /><rect x="562" y="47" width="6" height="6" /><rect x="574" y="47" width="6" height="6" />
+                                <rect x="538" y="59" width="6" height="6" /><rect x="550" y="59" width="6" height="6" /><rect x="562" y="59" width="6" height="6" /><rect x="574" y="59" width="6" height="6" />
+                                <rect x="538" y="71" width="6" height="6" /><rect x="550" y="71" width="6" height="6" /><rect x="562" y="71" width="6" height="6" /><rect x="574" y="71" width="6" height="6" />
+                            </g>
+
+                            <rect x="726" y="18" width="108" height="96" rx="16" fill="#ffffff" stroke="#e5e7eb" stroke-width="2" />
+                            <path d="M752 90 h56" stroke="#9e1b32" stroke-width="3" stroke-linecap="round" />
+                            <path d="M752 66 h40 a10 10 0 0 0 10-10 v-6 a10 10 0 0 0-10-10 h-40 a10 10 0 0 0-10 10 v6 a10 10 0 0 0 10 10z" fill="#fff" stroke="#d1d5db" stroke-width="1.6" />
+                            <circle cx="808" cy="90" r="12" fill="#dcfce7" stroke="#16a34a" stroke-width="1.8" />
+                            <path d="M802 90 l4 4 9-10" stroke="#15803d" stroke-width="2.2" fill="none" stroke-linecap="round" />
+                        </g>
+                    </svg>
+                </div>
+                <ol class="cdm-donations-explainer-steps list-unstyled mb-0">
+                    <li class="cdm-donations-explainer-step d-flex gap-3 mb-4">
+                        <span class="cdm-donations-step-badge flex-shrink-0">1</span>
+                        <div>
+                            <div class="fw-semibold">Create your donation</div>
+                            <p class="cdm-muted small mb-0">Sign in, tap <strong>Donate</strong>, and fill the short donation form — or use <strong>AI Snap &amp; donate</strong> from a photo. Items must be <strong>fair condition or better</strong> (not broken or unsafe). Publish and it will appear under your donation tracking flow.</p>
+                        </div>
+                    </li>
+                    <li class="cdm-donations-explainer-step d-flex gap-3 mb-4">
+                        <span class="cdm-donations-step-badge flex-shrink-0">2</span>
+                        <div>
+                            <div class="fw-semibold">Land on My donations</div>
+                            <p class="cdm-muted small mb-0">Once you publish, we take you straight to <strong>My donations</strong> so you can track what is still open and what you have already handed off.</p>
+                        </div>
+                    </li>
+                    <li class="cdm-donations-explainer-step d-flex gap-3 mb-4">
+                        <span class="cdm-donations-step-badge flex-shrink-0">3</span>
+                        <div>
+                            <div class="fw-semibold">Open details &amp; get your QR</div>
+                            <p class="cdm-muted small mb-0">Open any donation to double-check the info and tap <strong>Show drop-off QR code</strong>. That QR belongs to that specific item, so staff can quickly match what you are dropping off.</p>
+                        </div>
+                    </li>
+                    <li class="cdm-donations-explainer-step d-flex gap-3">
+                        <span class="cdm-donations-step-badge flex-shrink-0">4</span>
+                        <div>
+                            <div class="fw-semibold">Drop off &amp; staff confirmation (coming soon)</div>
+                            <p class="cdm-muted small mb-0">When you arrive at the drop-off spot, just show the QR and hand over the item. Next up, we will add the admin side so they can scan the code (or type the donation ID) and approve it on the spot.</p>
+                        </div>
+                    </li>
+                </ol>
+            `,
         },
     };
     const meta = sections[page];
@@ -1675,6 +2616,7 @@ function renderStaticSitePage() {
         donations: "nav-donations",
     };
     const active = activeByView[page];
+    const isDonationsPage = page === "donations";
 
     root.innerHTML = "";
 
@@ -1715,10 +2657,27 @@ function renderStaticSitePage() {
                         ← Back to home
                     </button>
 
-                    <div class="cdm-surface p-4 p-lg-5 mt-2">
+                    ${
+                        isDonationsPage
+                            ? `<div class="mt-2">
+                        <h1 class="h2 cdm-title mb-4">${meta.title}</h1>
+                        <div class="row g-3 g-md-4 mb-4 cdm-donations-cta-row mx-auto justify-content-center">
+                            <div class="col-12 col-md-6">
+                                <button type="button" class="btn cdm-btn-crimson btn-lg w-100 py-4 rounded-3 cdm-donations-cta-btn shadow-sm" data-action="donate-post">Donate</button>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <button type="button" class="btn btn-outline-dark btn-lg w-100 py-4 rounded-3 cdm-donations-cta-btn shadow-sm" data-action="my-donations">My donations</button>
+                            </div>
+                        </div>
+                        <div class="cdm-card border-0 shadow-sm p-4 p-lg-5 cdm-donations-explainer-card">
+                            ${meta.html}
+                        </div>
+                    </div>`
+                            : `<div class="cdm-surface p-4 p-lg-5 mt-2">
                         <h1 class="h3 cdm-title mb-3">${meta.title}</h1>
                         ${meta.html}
-                    </div>
+                    </div>`
+                    }
                 </div>
             </div>
         </div>
@@ -3076,18 +4035,10 @@ async function renderPost() {
                                 </div>
 
                                 <div class="col-12">
-                                    <span class="form-label fw-semibold d-block mb-2">Listing type</span>
-                                    <div class="d-flex flex-wrap gap-3">
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="listingType" id="lt-sell" value="sell" checked />
-                                            <label class="form-check-label" for="lt-sell">Sell</label>
-                                        </div>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="listingType" id="lt-donate" value="donate" />
-                                            <label class="form-check-label" for="lt-donate">Donate (free)</label>
-                                        </div>
+                                    <input type="hidden" name="listingType" id="post-listing-type" value="sell" />
+                                    <div class="cdm-muted small" id="post-listing-type-hint">
+                                        Selling: 7% platform fee on the seller side (policy — not charged in this draft). Use <strong>Donations</strong> in the nav to list for free.
                                     </div>
-                                    <div class="cdm-muted small mt-1">Selling: 7% platform fee on the seller side (policy — not charged in this draft).</div>
                                 </div>
 
                                 <div class="col-12 col-md-6" id="post-price-wrap">
@@ -3339,13 +4290,15 @@ function listingCardApiHtml(row) {
                 <div class="d-flex align-items-start gap-3">
                     ${thumb}
                     <div>
-                        <div class="fw-semibold">${title}</div>
+                        <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="db:${lid}">${title}</button>
                         <div class="cdm-muted small">${cat} · ${priceLabel}${condBit} · <span class="badge rounded-pill text-bg-light border">Published</span></div>
                     </div>
                 </div>
                 <div class="d-flex flex-wrap gap-2 justify-content-end">
                     <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="db:${lid}">View</button>
-                    <button type="button" class="btn btn-sm btn-outline-primary" data-action="edit-listing" data-listing-id="${escapeHtml(idRaw)}">Edit</button>
+                    <button type="button" class="btn btn-sm btn-outline-primary" data-action="edit-listing" data-listing-id="${escapeHtml(
+                        idRaw,
+                    )}" data-donation="${priceNum === 0 ? "true" : "false"}">Edit</button>
                     <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete-listing" data-listing-id="${escapeHtml(
                         idRaw,
                     )}" data-listing-title="${titleForConfirm}">Delete</button>
@@ -3357,6 +4310,76 @@ function listingCardApiHtml(row) {
     `;
 }
 
+/** Free listing (price 0) on My donations — `completed` means user marked handoff done (local only). */
+function donationListingCardHtml(row, completed) {
+    const title = escapeHtml(row.title);
+    const cat = escapeHtml(categoryLabel[row.category] || row.category || "—");
+    const condRaw = row.condition ?? row.Condition ?? null;
+    const condBit =
+        condRaw != null && String(condRaw).trim() !== ""
+            ? ` · ${escapeHtml(formatListingCondition(condRaw))}`
+            : "";
+    const desc = row.description
+        ? escapeHtml(row.description.slice(0, 160)) + (row.description.length > 160 ? "…" : "")
+        : "—";
+    const when = row.createdAt ? escapeHtml(formatSavedAt(row.createdAt)) : "—";
+    const urlRaw = row.imageUrl ?? row.ImageUrl;
+    const idNum = row.listingId ?? row.ListingId;
+    const fb = encodeURIComponent(row.title || "Listing");
+    const thumb =
+        urlRaw && String(urlRaw).trim()
+            ? `<img class="cdm-photo-thumb" alt="" data-cdm-thumb-fallback="${fb}" data-mine-thumb-id="${escapeHtml(String(idNum))}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+            : "";
+    const lid = escapeHtml(String(row.listingId));
+    const idRaw = String(idNum);
+    const statusBadge = completed
+        ? `<span class="badge rounded-pill text-bg-success">Completed</span>`
+        : `<span class="badge rounded-pill text-bg-warning text-dark">Pending drop-off</span>`;
+    const actions = completed
+        ? `<span class="small cdm-muted">Marked complete on this device.</span>`
+        : `<button type="button" class="btn btn-sm btn-outline-success" data-action="donation-mark-done" data-listing-id="${escapeHtml(
+              idRaw,
+          )}">Mark handed off</button>`;
+    return `
+        <div class="cdm-card p-3 mb-3">
+            <div class="d-flex flex-wrap justify-content-between gap-2 align-items-start">
+                <div class="d-flex align-items-start gap-3">
+                    ${thumb}
+                    <div>
+                        <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-donation" data-listing-id="${escapeHtml(idRaw)}">${title}</button>
+                        <div class="cdm-muted small">${cat} · Free${condBit} · ${statusBadge}</div>
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap gap-2 justify-content-end align-items-center">
+                    <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-donation" data-listing-id="${escapeHtml(idRaw)}">View</button>
+                    ${actions}
+                </div>
+            </div>
+            <p class="small mb-2 mt-2">${desc}</p>
+            <div class="small cdm-muted">Posted: ${when}</div>
+        </div>
+    `;
+}
+
+function wireMyDonationsPage(root) {
+    root.querySelectorAll("[data-action='view-donation']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const id = btn.getAttribute("data-listing-id");
+            if (!id) return;
+            openDonationDetail(id);
+        });
+    });
+    root.querySelectorAll("[data-action='donation-mark-done']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const id = btn.getAttribute("data-listing-id");
+            if (!id) return;
+            markDonationHandoffCompleted(id);
+            render();
+        });
+    });
+}
+
 function wireMyListingsPage(root) {
     root.querySelectorAll("[data-action='edit-listing']").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -3364,7 +4387,11 @@ function wireMyListingsPage(root) {
             if (!id) return;
             state.editingListingId = Number(id);
             state.postEditPrefill = null;
-            navigate("post");
+            if (btn.getAttribute("data-donation") === "true") {
+                navigate("donate-post");
+            } else {
+                navigate("post");
+            }
         });
     });
     root.querySelectorAll("[data-action='delete-listing']").forEach((btn) => {
@@ -3813,6 +4840,299 @@ async function renderMyListings() {
     wireListingImageFallbacks(shell);
 }
 
+async function renderDonationDetail() {
+    const root = document.getElementById("app");
+    const rawId = state.donationDetailListingId;
+    if (rawId == null || !Number.isFinite(Number(rawId))) {
+        navigate("my-donations");
+        return;
+    }
+
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading donation…</div></div>`;
+
+    const { res, data } = await apiJson(`/api/listings/${encodeURIComponent(String(rawId))}`);
+    if (!res.ok) {
+        const msg =
+            typeof data === "string" ? data : data?.detail || data?.title || `Could not load listing (HTTP ${res.status}).`;
+        alert(msg);
+        state.donationDetailListingId = null;
+        navigate("my-donations");
+        return;
+    }
+
+    const L = /** @type {Record<string, unknown>} */ (data);
+    const myId = parseJwtSub(state.token);
+    const sid = L.sellerId ?? L.SellerId;
+    const price = Number(L.price);
+    if (myId == null || sid == null || Number(sid) !== myId || !Number.isFinite(price) || price !== 0) {
+        alert("You can only open your own free donation listings here.");
+        state.donationDetailListingId = null;
+        navigate("my-donations");
+        return;
+    }
+
+    const lid = L.listingId ?? L.ListingId;
+    const idStr = String(lid);
+    const handoffDone = getDonationHandoffCompletedIds().has(idStr);
+
+    const title = escapeHtml(L.title);
+    const cat = escapeHtml(categoryLabel[/** @type {string} */(L.category)] || String(L.category || "—"));
+    const conditionRaw = L.condition ?? L.Condition ?? null;
+    const condHtml = escapeHtml(formatListingCondition(conditionRaw));
+    const dimensionsRaw = L.dimensions ?? L.Dimensions ?? null;
+    const dimBlock =
+        dimensionsRaw != null && String(dimensionsRaw).trim() !== ""
+            ? `<p class="mb-2 small"><span class="text-muted">Dimensions</span> ${escapeHtml(String(dimensionsRaw).trim())}</p>`
+            : "";
+    const posted =
+        L.createdAt != null ? escapeHtml(new Date(/** @type {string} */(L.createdAt)).toLocaleString()) : "—";
+    const desc = escapeHtml(L.description ? String(L.description) : "—");
+    const fb = encodeURIComponent(String(L.title || "Donation"));
+    const urlRaw = L.imageUrl ?? L.ImageUrl;
+    const galleryHtml =
+        urlRaw && String(urlRaw).trim()
+            ? `<img id="cdm-donation-hero-img" class="cdm-photo-hero cdm-photo-hero--listing" alt="" data-cdm-thumb-fallback="${fb}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+            : `<div class="cdm-listing-gallery-empty text-muted small">No image</div>`;
+
+    const statusBadge = handoffDone
+        ? `<span class="badge rounded-pill text-bg-success">Marked handed off (this device)</span>`
+        : `<span class="badge rounded-pill text-bg-warning text-dark">Pending</span>`;
+
+    root.innerHTML = "";
+
+    const shell = el(`
+        <div class="cdm-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+                    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#cdmNavDonationDetail" aria-controls="cdmNavDonationDetail" aria-expanded="false" aria-label="Toggle navigation">
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="cdmNavDonationDetail">
+                        ${topNavPrimaryLinksHtml(null)}
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                            <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+            <div class="body-content cdm-body-content">
+                <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    <button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="my-donations">← My donations</button>
+                    <div class="alert alert-light border mb-3 mb-lg-4">
+                        <div class="fw-semibold">View only</div>
+                        <div class="small cdm-muted mb-0">This page is for reviewing your donation and showing a drop-off QR at the designated location. To change the listing, use <strong>My listings</strong> → Edit.</div>
+                    </div>
+                    <div class="cdm-surface p-4 p-lg-5 mt-2">
+                        <div class="row g-4 g-lg-5 align-items-start">
+                            <div class="col-12 col-lg-7">
+                                <div class="cdm-listing-gallery">${galleryHtml}</div>
+                            </div>
+                            <div class="col-12 col-lg-5">
+                                <div class="cdm-card p-4">
+                                    <p class="small text-muted text-uppercase mb-1">Your donation</p>
+                                    <h1 class="h3 cdm-title mb-2">${title}</h1>
+                                    <p class="cdm-muted small mb-2">${cat} · <strong>Free</strong> · Condition: ${condHtml} · ${statusBadge}</p>
+                                    <p class="small mb-2"><span class="text-muted">Listing #</span> <span class="font-monospace">${escapeHtml(idStr)}</span></p>
+                                    <p class="small mb-2"><span class="text-muted">Posted</span> ${posted}</p>
+                                    ${dimBlock}
+                                    <div class="border rounded-3 p-3 bg-light mt-3 cdm-donation-dropoff-box">
+                                        <div class="fw-semibold small mb-2">Physical drop-off</div>
+                                        <p class="small cdm-muted mb-3 mb-lg-4">Bring the item to the marked campus location. Show this QR so staff can verify this donation matches your listing (approval by admin is coming soon).</p>
+                                        <button type="button" class="btn cdm-btn-crimson" id="cdm-donation-qr-trigger">Show drop-off QR code</button>
+                                        <div id="cdm-donation-qr-panel" class="d-none mt-3">
+                                            <div class="d-flex flex-column align-items-start gap-2">
+                                                <div id="cdm-donation-qr-host" class="cdm-donation-qr-host p-2 bg-white border rounded"></div>
+                                                <p class="small font-monospace mb-1 text-break w-100" id="cdm-donation-qr-text"></p>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="cdm-donation-qr-copy">Copy verification text</button>
+                                            </div>
+                                            <p class="small text-muted mt-2 mb-0">Admin will later be able to type listing #${escapeHtml(idStr)} or scan this code to confirm drop-off.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="cdm-card p-4 mt-4">
+                            <h2 class="h5 fw-semibold mb-3">Description</h2>
+                            <div class="text-body">${desc}</div>
+                            <h3 class="h6 text-uppercase cdm-muted small mb-2 mt-4">Pickup / delivery (read-only)</h3>
+                            <p class="small text-body mb-0">${escapeHtml(fulfillmentSummaryText(L))}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireDonationDetailPage(shell, L);
+}
+
+/**
+ * @param {HTMLElement} shell
+ * @param {Record<string, unknown>} listing
+ */
+function wireDonationDetailPage(shell, listing) {
+    const lid = listing.listingId ?? listing.ListingId;
+    const payload = buildDonationDropoffQrPayload(lid);
+
+    shell.querySelector("#cdm-donation-qr-trigger")?.addEventListener("click", () => {
+        const panel = shell.querySelector("#cdm-donation-qr-panel");
+        const host = shell.querySelector("#cdm-donation-qr-host");
+        const textEl = shell.querySelector("#cdm-donation-qr-text");
+        if (textEl) textEl.textContent = payload;
+        panel?.classList.remove("d-none");
+        if (!host) return;
+        host.innerHTML = "";
+        try {
+            if (typeof QRCode !== "undefined") {
+                // eslint-disable-next-line no-undef
+                new QRCode(host, {
+                    text: payload,
+                    width: 220,
+                    height: 220,
+                });
+                return;
+            }
+        } catch (e) {
+            console.warn("QRCode render failed", e);
+        }
+        const img = document.createElement("img");
+        img.alt = "Donation drop-off QR";
+        img.width = 220;
+        img.height = 220;
+        img.src = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(payload)}`;
+        img.loading = "lazy";
+        host.appendChild(img);
+    });
+
+    shell.querySelector("#cdm-donation-qr-copy")?.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(payload);
+        } catch {
+            alert("Could not copy — select the text manually.");
+            return;
+        }
+        const btn = shell.querySelector("#cdm-donation-qr-copy");
+        if (btn) btn.textContent = "Copied!";
+        setTimeout(() => {
+            if (btn) btn.textContent = "Copy verification text";
+        }, 2000);
+    });
+
+    wireNav(shell);
+    ensureAuthUi();
+    wireListingImageFallbacks(shell);
+    const hero = shell.querySelector("#cdm-donation-hero-img");
+    const u = listing.imageUrl ?? listing.ImageUrl;
+    if (hero && u && String(u).trim()) {
+        hero.src = String(u).trim();
+    }
+}
+
+async function renderMyDonations() {
+    const root = document.getElementById("app");
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading donations…</div></div>`;
+
+    let apiRows = [];
+    if (state.token) {
+        const { res, data } = await apiJson("/api/listings/mine?limit=48");
+        if (res.ok && Array.isArray(data)) {
+            const myId = parseJwtSub(state.token);
+            apiRows = data.filter((row) => {
+                const sid = row.sellerId ?? row.SellerId;
+                const okSeller = myId != null && sid != null && Number(sid) === myId;
+                const p = Number(row.price);
+                return okSeller && Number.isFinite(p) && p === 0;
+            });
+        }
+    }
+
+    const doneIds = getDonationHandoffCompletedIds();
+    const pending = apiRows.filter((row) => !doneIds.has(String(row.listingId ?? row.ListingId)));
+    const completed = apiRows.filter((row) => doneIds.has(String(row.listingId ?? row.ListingId)));
+
+    state.mineThumbSrcById = {};
+    apiRows.forEach((row) => {
+        const id = row.listingId ?? row.ListingId;
+        const u = row.imageUrl ?? row.ImageUrl;
+        if (id != null && u && String(u).trim()) {
+            state.mineThumbSrcById[String(id)] = String(u).trim();
+        }
+    });
+
+    const pendingHtml = pending.length
+        ? `<h2 class="h6 text-uppercase cdm-muted small mb-3" style="letter-spacing:0.06em;">Pending</h2>${pending.map((r) => donationListingCardHtml(r, false)).join("")}`
+        : `<p class="cdm-muted small mb-4">No open donation listings. <button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-action="donate-post">Donate an item</button></p>`;
+    const completedHtml = completed.length
+        ? `<h2 class="h6 text-uppercase cdm-muted small mb-3 mt-4" style="letter-spacing:0.06em;">Completed</h2>${completed.map((r) => donationListingCardHtml(r, true)).join("")}`
+        : "";
+
+    const sub = `${apiRows.length} free listing${apiRows.length === 1 ? "" : "s"} on your account`;
+
+    root.innerHTML = "";
+
+    const shell = el(`
+        <div class="cdm-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <span class="fw-bold">CDM</span>
+                        <span class="opacity-90">Campus Dorm Marketplace</span>
+                    </a>
+
+                    <button
+                        class="navbar-toggler"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavMyDonations"
+                        aria-controls="cdmNavMyDonations"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+
+                    <div class="collapse navbar-collapse" id="cdmNavMyDonations">
+                        ${topNavPrimaryLinksHtml(null)}
+
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                            <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <div class="body-content cdm-body-content">
+                <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    <button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="nav-donations">
+                        ← Donations
+                    </button>
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                        <div>
+                            <h1 class="h3 cdm-title mb-1">My donations</h1>
+                            <p class="cdm-muted small mb-0">${escapeHtml(sub)}</p>
+                        </div>
+                        <button type="button" class="btn cdm-btn-crimson" data-action="donate-post">Donate</button>
+                    </div>
+                    <p class="small cdm-muted mb-4">Your donation items — tap <strong>View</strong> or the title to pull up details and the <strong>drop-off QR code</strong>. Mark <strong>handed off</strong> once you have dropped the item off (stored on this browser only).</p>
+                    <div id="my-donations-body">${pendingHtml}${completedHtml}</div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+    wireMyDonationsPage(shell);
+    hydrateMineListingThumbs(shell);
+    wireListingImageFallbacks(shell);
+}
+
 function syncApiPill() {
     const pill = document.getElementById("api-pill");
     if (pill) pill.textContent = `API: ${state.apiHealth.status}`;
@@ -3823,8 +5143,14 @@ function render() {
         renderAuth();
     } else if (state.view === "post") {
         void renderPost();
+    } else if (state.view === "donate-post") {
+        void renderDonatePost();
     } else if (state.view === "my-listings") {
         void renderMyListings();
+    } else if (state.view === "my-donations") {
+        void renderMyDonations();
+    } else if (state.view === "donation-detail") {
+        void renderDonationDetail();
     } else if (state.view === "listing") {
         void renderListing();
     } else if (state.view === "profile") {
