@@ -804,11 +804,7 @@ function homeFeedCardHtml(item) {
     const condLine = condRaw
         ? `<div class="small mt-1"><span class="text-muted">Condition</span> <span class="text-dark">${escapeHtml(formatListingCondition(condRaw))}</span></div>`
         : "";
-    const scoreRaw = Number(item.matchScore);
-    const score =
-        Number.isFinite(scoreRaw) && item.matchScore != null
-            ? Math.max(0, Math.min(100, Math.round(scoreRaw)))
-            : estimateFallbackMatchScore(item);
+    const score = effectiveHomeFeedMatchPct(item);
     const scoreTone = score >= 80 ? "success" : score >= 60 ? "warning" : "secondary";
     const matchBadge = `<span class="badge text-bg-${scoreTone} cdm-match-badge">${escapeHtml(String(score))}% match</span>`;
     return `
@@ -870,6 +866,23 @@ function estimateFallbackMatchScore(item) {
     if (item?.categorySlug) score += 4;
 
     return Math.max(0, Math.min(100, score));
+}
+
+/** Same % as the home card badge — used for ordering the grid. */
+function effectiveHomeFeedMatchPct(item) {
+    const raw = item?.matchScore;
+    if (raw != null && raw !== "" && Number.isFinite(Number(raw))) {
+        return Math.max(0, Math.min(100, Math.round(Number(raw))));
+    }
+    return estimateFallbackMatchScore(item);
+}
+
+function sortHomeFeedItemsByMatchDesc(items) {
+    return [...items].sort((a, b) => {
+        const d = effectiveHomeFeedMatchPct(b) - effectiveHomeFeedMatchPct(a);
+        if (d !== 0) return d;
+        return String(a.key).localeCompare(String(b.key));
+    });
 }
 
 function applyFeedFilters(items) {
@@ -994,6 +1007,7 @@ async function fetchFeedItemsForHome() {
     const sample = SAMPLE_HOME_FEED.map((x) => {
         const priceNum = Number(x.priceNum);
         const photoDataUrl = x.photoDataUrl || demoThumbSvgDataUrl(x.title);
+        const blurbPct = String(x.blurb || "").match(/^(\d+)%\s*match/i);
         return {
             key: `sample:${x.id}`,
             title: x.title,
@@ -1010,7 +1024,7 @@ async function fetchFeedItemsForHome() {
                 x.spaceSuitability != null && String(x.spaceSuitability).trim() !== ""
                     ? String(x.spaceSuitability).trim()
                     : null,
-            matchScore: 0,
+            matchScore: blurbPct ? Number(blurbPct[1]) : null,
         };
     });
     const fillSampleThumbs = () => {
@@ -1022,9 +1036,9 @@ async function fetchFeedItemsForHome() {
     // so "Buy" always maps to a real listing_id and POST /api/transactions can persist.
     if (!state.token) {
         fillSampleThumbs();
-        return [...dbCards, ...sample].slice(0, 9);
+        return sortHomeFeedItemsByMatchDesc([...dbCards, ...sample]).slice(0, 9);
     }
-    return dbCards.slice(0, 9);
+    return sortHomeFeedItemsByMatchDesc(dbCards).slice(0, 9);
 }
 
 async function buildHomeFeedRowsHtml() {
