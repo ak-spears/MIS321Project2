@@ -91,7 +91,7 @@ public sealed class ListingMatchService
         await EnsureListingScoresTableAsync(conn, cancellationToken);
 
         var existing = await ReadScoreRowAsync(conn, listing.ListingId, userId, cancellationToken);
-        var listingFreshAt = listing.CreatedAt;
+        var listingFreshAt = listing.CreatedAt ?? DateTime.UtcNow;
         var needsRescore = existing is null || existing.Value.ScoredAt < listingFreshAt;
 
         if (existing is { } rowOk && !needsRescore && !string.IsNullOrWhiteSpace(rowOk.Reason))
@@ -166,7 +166,7 @@ public sealed class ListingMatchService
             Condition = listing.Condition,
             GapSolution = listing.GapSolution,
             SpaceSuitability = listing.SpaceSuitability,
-            CreatedAt = listing.CreatedAt,
+            CreatedAt = listing.CreatedAt ?? DateTime.UtcNow,
         };
 
     /// <summary>Aligns with frontend <c>estimateFallbackMatchScore</c> for guests (no JWT).</summary>

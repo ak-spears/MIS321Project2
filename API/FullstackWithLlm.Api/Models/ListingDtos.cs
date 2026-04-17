@@ -70,7 +70,16 @@ public sealed class ListingDetailDto
     public string? ImageUrl { get; init; }
     public string Status { get; init; } = "";
     public string SellerDisplayName { get; init; } = "";
-    public DateTime CreatedAt { get; init; }
+    /// <summary>Null when the DB has an invalid/zero datetime (MySQL legacy rows).</summary>
+    public DateTime? CreatedAt { get; init; }
+}
+
+/// <summary>Listing detail plus reviews for this listing and the seller&apos;s overall rating (SPA detail page).</summary>
+public sealed class ListingDetailContextDto
+{
+    public ListingDetailDto Listing { get; init; } = new();
+    public IReadOnlyList<UserRatingDto> ListingReviews { get; init; } = Array.Empty<UserRatingDto>();
+    public RatingSummaryDto SellerRatingSummary { get; init; } = new();
 }
 
 public sealed class ListingMatchReasonDto

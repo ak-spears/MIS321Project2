@@ -48,5 +48,13 @@ public sealed class FlaggedReviewDto
     public bool IsFlagged { get; init; }
     public bool IsHarsh { get; init; }
     public string CreatedAt { get; init; } = ""; // ISO-ish
+
+    /// <summary>True when the rated seller (ratee) has <c>users.on_probation = 1</c>.</summary>
+    public bool RateeOnProbation { get; init; }
+}
+
+public sealed class SetUserProbationRequestDto
+{
+    public bool OnProbation { get; set; }
 }
 

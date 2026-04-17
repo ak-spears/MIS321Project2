@@ -971,14 +971,14 @@ public sealed class ListingRepository
                 l.dimensions,
                 l.gap_solution,
                 l.storage_notes,
-                l.pickup_start,
-                l.pickup_end,
+                NULLIF(l.pickup_start, '0000-00-00') AS pickup_start,
+                NULLIF(l.pickup_end, '0000-00-00') AS pickup_end,
                 l.pickup_location,
                 l.delivery_notes,
                 l.space_suitability,
                 l.image_url,
                 l.status,
-                l.created_at,
+                NULLIF(l.created_at, '0000-00-00 00:00:00') AS created_at,
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
@@ -1027,7 +1027,7 @@ public sealed class ListingRepository
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
-            CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
+            CreatedAt = reader.IsDBNull(reader.GetOrdinal("created_at")) ? null : reader.GetDateTime(reader.GetOrdinal("created_at")),
         };
     }
 
@@ -1046,7 +1046,7 @@ public sealed class ListingRepository
                 l.category,
                 CAST(NULL AS CHAR) AS image_url,
                 l.status,
-                l.created_at,
+                NULLIF(l.created_at, '0000-00-00 00:00:00') AS created_at,
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
@@ -1085,7 +1085,7 @@ public sealed class ListingRepository
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
-            CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
+            CreatedAt = reader.IsDBNull(reader.GetOrdinal("created_at")) ? null : reader.GetDateTime(reader.GetOrdinal("created_at")),
         };
     }
 }

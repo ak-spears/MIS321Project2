@@ -172,7 +172,26 @@ public sealed class AdminRepository
         CancellationToken cancellationToken)
     {
         // is_flagged / is_harsh are added via alter script; if missing, return empty.
-        const string sql = """
+        // Join users for ratee probation when users.on_probation exists.
+        const string sqlWithProbation = """
+            SELECT r.rating_id,
+                   r.listing_id,
+                   r.rater_id,
+                   r.ratee_id,
+                   r.score,
+                   r.comment,
+                   COALESCE(r.is_flagged, 0) AS is_flagged,
+                   COALESCE(r.is_harsh, 0) AS is_harsh,
+                   r.created_at,
+                   COALESCE(u.on_probation, 0) AS ratee_on_probation
+            FROM ratings r
+            INNER JOIN users u ON u.user_id = r.ratee_id
+            WHERE (COALESCE(r.is_flagged, 0) = 1 OR COALESCE(r.is_harsh, 0) = 1 OR r.score <= 3)
+            ORDER BY r.created_at DESC
+            LIMIT 100;
+            """;
+
+        const string sqlNoProbation = """
             SELECT rating_id, listing_id, rater_id, ratee_id, score, comment,
                    COALESCE(is_flagged, 0) AS is_flagged,
                    COALESCE(is_harsh, 0) AS is_harsh,
@@ -183,32 +202,54 @@ public sealed class AdminRepository
             LIMIT 100;
             """;
 
-        await using var cmd = new MySqlCommand(sql, conn);
+        static FlaggedReviewDto ReadRow(MySqlDataReader reader, bool includeProbation)
+        {
+            var rateeProb = includeProbation && reader.FieldCount > 9 && !reader.IsDBNull(9) && reader.GetInt32(9) == 1;
+            return new FlaggedReviewDto
+            {
+                RatingId = reader.GetInt32(0),
+                ListingId = reader.GetInt32(1),
+                RaterId = reader.GetInt32(2),
+                RateeId = reader.GetInt32(3),
+                Score = reader.GetByte(4),
+                Comment = reader.IsDBNull(5) ? null : reader.GetString(5),
+                IsFlagged = !reader.IsDBNull(6) && reader.GetInt32(6) == 1,
+                IsHarsh = !reader.IsDBNull(7) && reader.GetInt32(7) == 1,
+                CreatedAt = reader.GetDateTime(8).ToString("s"),
+                RateeOnProbation = rateeProb,
+            };
+        }
+
         try
         {
+            await using var cmd = new MySqlCommand(sqlWithProbation, conn);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             var rows = new List<FlaggedReviewDto>();
             while (await reader.ReadAsync(cancellationToken))
             {
-                rows.Add(new FlaggedReviewDto
-                {
-                    RatingId = reader.GetInt32(0),
-                    ListingId = reader.GetInt32(1),
-                    RaterId = reader.GetInt32(2),
-                    RateeId = reader.GetInt32(3),
-                    Score = reader.GetByte(4),
-                    Comment = reader.IsDBNull(5) ? null : reader.GetString(5),
-                    IsFlagged = !reader.IsDBNull(6) && reader.GetInt32(6) == 1,
-                    IsHarsh = !reader.IsDBNull(7) && reader.GetInt32(7) == 1,
-                    CreatedAt = reader.GetDateTime(8).ToString("s"),
-                });
+                rows.Add(ReadRow(reader, includeProbation: true));
             }
 
             return rows;
         }
         catch (MySqlException mx) when (mx.Number == 1054)
         {
-            return Array.Empty<FlaggedReviewDto>();
+            try
+            {
+                await using var cmd = new MySqlCommand(sqlNoProbation, conn);
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                var rows = new List<FlaggedReviewDto>();
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    rows.Add(ReadRow(reader, includeProbation: false));
+                }
+
+                return rows;
+            }
+            catch (MySqlException mx2) when (mx2.Number == 1054)
+            {
+                return Array.Empty<FlaggedReviewDto>();
+            }
         }
     }
 }

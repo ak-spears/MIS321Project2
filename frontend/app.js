@@ -21,6 +21,11 @@ const API_BASE = (function resolveApiBase() {
     return "http://localhost:5147";
 })();
 
+/** How many rows to pull from GET /api/listings/feed (server caps at 250). */
+const HOME_FEED_FETCH_LIMIT = 250;
+/** Max cards rendered on home after merge/sort (logged-out includes demo sample cards). */
+const HOME_FEED_DISPLAY_CAP = 250;
+
 /**
  * Prefer API listing id on the checkout context; fall back to `db:123` key so
  * POST /api/transactions still runs if JSON used a different property name.
@@ -209,6 +214,8 @@ const state = {
     listingMatchReasonById: /** @type {Record<string, { score: number, reason: string }>} */ ({}),
     /** After feed fetch: listing id string → % shown on card (matches “Why this match?” line). */
     feedMatchScoreByListingId: /** @type {Record<string, number>} */ ({}),
+    /** Admin dashboard: `GET /api/admin/dashboard?weeks=` (1–52). */
+    adminDashboardWeeks: 12,
 };
 
 /**
@@ -936,7 +943,7 @@ async function fetchFeedItemsForHome() {
     let dbCards = [];
     const myId = parseJwtSub(state.token);
     try {
-        const res = await fetch(`${API_BASE}/api/listings/feed?limit=24`, {
+        const res = await fetch(`${API_BASE}/api/listings/feed?limit=${HOME_FEED_FETCH_LIMIT}`, {
             headers: { Accept: "application/json", ...feedAuthHeaders() },
         });
         if (res.ok) {
@@ -1036,9 +1043,9 @@ async function fetchFeedItemsForHome() {
     // so "Buy" always maps to a real listing_id and POST /api/transactions can persist.
     if (!state.token) {
         fillSampleThumbs();
-        return sortHomeFeedItemsByMatchDesc([...dbCards, ...sample]).slice(0, 9);
+        return sortHomeFeedItemsByMatchDesc([...dbCards, ...sample]).slice(0, HOME_FEED_DISPLAY_CAP);
     }
-    return sortHomeFeedItemsByMatchDesc(dbCards).slice(0, 9);
+    return sortHomeFeedItemsByMatchDesc(dbCards).slice(0, HOME_FEED_DISPLAY_CAP);
 }
 
 async function buildHomeFeedRowsHtml() {
@@ -4050,6 +4057,187 @@ function renderAuth() {
     ensureAuthUi();
 }
 
+/** @type {unknown[]} */
+let adminDashboardChartInstances = [];
+
+function destroyAdminDashboardCharts() {
+    for (const c of adminDashboardChartInstances) {
+        try {
+            if (c && typeof c === "object" && "destroy" in c && typeof /** @type {{ destroy: () => void }} */ (c).destroy === "function") {
+                /** @type {{ destroy: () => void }} */ (c).destroy();
+            }
+        } catch (_) {
+            // ignore
+        }
+    }
+    adminDashboardChartInstances = [];
+}
+
+/**
+ * @param {string} iso
+ */
+function formatAdminWeekLabel(iso) {
+    const parts = String(iso).split("-").map((x) => Number(x));
+    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return String(iso);
+    const dt = new Date(parts[0], parts[1] - 1, parts[2]);
+    return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/**
+ * @param {unknown[]} weekly
+ * @param {unknown[]} revenue
+ */
+function buildAdminWeekSeries(weekly, revenue) {
+    /** @type {Map<string, { count: number, gross: number, fees: number, txns: number }>} */
+    const byWeek = new Map();
+    for (const r of weekly) {
+        const row = /** @type {{ weekStart?: string, count?: number }} */ (r);
+        const w = String(row.weekStart ?? "");
+        if (!w) continue;
+        byWeek.set(w, { count: Number(row.count ?? 0), gross: 0, fees: 0, txns: 0 });
+    }
+    for (const r of revenue) {
+        const row = /** @type {{ weekStart?: string, grossAmount?: number, platformFees?: number, completedTransactions?: number }} */ (r);
+        const w = String(row.weekStart ?? "");
+        if (!w) continue;
+        const cur = byWeek.get(w) ?? { count: 0, gross: 0, fees: 0, txns: 0 };
+        cur.gross = Number(row.grossAmount ?? 0);
+        cur.fees = Number(row.platformFees ?? 0);
+        cur.txns = Number(row.completedTransactions ?? 0);
+        byWeek.set(w, cur);
+    }
+    const labels = [...byWeek.keys()].sort();
+    return {
+        labels,
+        displayLabels: labels.map(formatAdminWeekLabel),
+        listings: labels.map((w) => /** @type {number} */ (byWeek.get(w)?.count)),
+        gross: labels.map((w) => /** @type {number} */ (byWeek.get(w)?.gross)),
+        fees: labels.map((w) => /** @type {number} */ (byWeek.get(w)?.fees)),
+        txns: labels.map((w) => /** @type {number} */ (byWeek.get(w)?.txns)),
+    };
+}
+
+/**
+ * @param {HTMLElement} shell
+ * @param {{
+ *   labels: string[],
+ *   displayLabels: string[],
+ *   listings: number[],
+ *   gross: number[],
+ *   fees: number[],
+ *   txns: number[],
+ * }} series
+ */
+function mountAdminDashboardCharts(shell, series) {
+    destroyAdminDashboardCharts();
+
+    const raw = /** @type {unknown} */ (globalThis).Chart;
+    const ChartCtor =
+        typeof raw === "function" ? /** @type {new (canvas: HTMLCanvasElement, cfg: object) => { destroy: () => void, resize?: () => void }} */ (raw) : null;
+
+    function showChartFallback(canvasId, message) {
+        const canvas = /** @type {HTMLCanvasElement | null} */ (shell.querySelector(canvasId));
+        const wrap = canvas?.parentElement;
+        if (wrap) {
+            wrap.innerHTML = "";
+            wrap.appendChild(el(`<p class="cdm-muted small mb-0">${escapeHtml(message)}</p>`));
+        }
+    }
+
+    if (!ChartCtor) {
+        showChartFallback("#admin-chart-revenue", "Charts need Chart.js (script blocked, offline, or failed to load).");
+        showChartFallback("#admin-chart-sales", "Charts need Chart.js (script blocked, offline, or failed to load).");
+        showChartFallback("#admin-chart-listings", "Charts need Chart.js (script blocked, offline, or failed to load).");
+        return;
+    }
+
+    const fontFamily =
+        'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"';
+    const base = {
+        maintainAspectRatio: false,
+        responsive: true,
+        animation: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: { mode: /** @type {"index"} */ ("index"), intersect: false },
+        },
+    };
+
+    const xScale = {
+        type: /** @type {"category"} */ ("category"),
+        ticks: { maxRotation: 45, minRotation: 0, font: { size: 10, family: fontFamily } },
+        grid: { display: false },
+    };
+    const yGridLine = "rgba(15, 23, 42, 0.06)";
+
+    /**
+     * @param {string} canvasId
+     * @param {string} label
+     * @param {number[]} data
+     * @param {string} color
+     * @param {((v: string | number) => string) | null} [yTickFormat]
+     */
+    function makeBar(canvasId, label, data, color, yTickFormat) {
+        const canvas = /** @type {HTMLCanvasElement | null} */ (shell.querySelector(canvasId));
+        if (!canvas) return;
+        /** @type {{ font: object, callback?: (v: string | number) => string }} */
+        const yTicks = { font: { size: 10, family: fontFamily } };
+        if (yTickFormat) yTicks.callback = yTickFormat;
+        try {
+            const inst = new ChartCtor(canvas, {
+                type: "bar",
+                data: {
+                    labels: series.displayLabels.length ? series.displayLabels : ["—"],
+                    datasets: [
+                        {
+                            label,
+                            data: series.displayLabels.length ? data : [0],
+                            backgroundColor: color,
+                            borderRadius: 6,
+                            maxBarThickness: 40,
+                        },
+                    ],
+                },
+                options: {
+                    ...base,
+                    scales: {
+                        x: xScale,
+                        y: {
+                            type: /** @type {"linear"} */ ("linear"),
+                            beginAtZero: true,
+                            grid: { color: yGridLine },
+                            ticks: yTicks,
+                        },
+                    },
+                },
+            });
+            adminDashboardChartInstances.push(inst);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            showChartFallback(canvasId, `Chart error: ${msg}`);
+        }
+    }
+
+    const run = () => {
+        makeBar("#admin-chart-revenue", "Gross ($)", series.gross, "rgba(158, 27, 50, 0.88)", (v) => "$" + Number(v).toFixed(0));
+        makeBar("#admin-chart-sales", "Completed sales", series.txns, "rgba(37, 99, 235, 0.85)");
+        makeBar("#admin-chart-listings", "New listings posted", series.listings, "rgba(5, 150, 105, 0.85)");
+        for (const c of adminDashboardChartInstances) {
+            try {
+                const inst = /** @type {{ resize?: () => void }} */ (c);
+                if (typeof inst.resize === "function") inst.resize();
+            } catch (_) {
+                // ignore
+            }
+        }
+    };
+
+    // Let the flex layout settle so Chart.js reads non-zero container width (fixes blank charts when mounted synchronously).
+    requestAnimationFrame(() => {
+        requestAnimationFrame(run);
+    });
+}
+
 function renderAdminLogin() {
     const root = document.getElementById("app");
     const existing = getAdminSessionPassword();
@@ -4134,8 +4322,13 @@ async function renderAdminDashboard() {
         return;
     }
 
+    destroyAdminDashboardCharts();
     root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading admin dashboard…</div></div>`;
-    const res = await fetch(`${API_BASE}/api/admin/dashboard?weeks=12`, {
+
+    const weeksParam = Math.min(52, Math.max(1, Number(state.adminDashboardWeeks) || 12));
+    state.adminDashboardWeeks = weeksParam;
+
+    const res = await fetch(`${API_BASE}/api/admin/dashboard?weeks=${encodeURIComponent(String(weeksParam))}`, {
         headers: { Accept: "application/json", "X-Admin-Password": pw },
     });
     if (!res.ok) {
@@ -4151,16 +4344,23 @@ async function renderAdminDashboard() {
     const lowRated = Array.isArray(data.lowRatedUsers) ? data.lowRatedUsers : [];
     const flagged = Array.isArray(data.flaggedOrHarshReviews) ? data.flaggedOrHarshReviews : [];
 
-    const weeklyRows = weekly.length
-        ? weekly
-              .slice(0, 12)
+    const totalNewListings = weekly.reduce((s, r) => s + Number(/** @type {{ count?: number }} */ (r).count ?? 0), 0);
+    const totalGross = revenue.reduce((s, r) => s + Number(/** @type {{ grossAmount?: number }} */ (r).grossAmount ?? 0), 0);
+    const totalFees = revenue.reduce((s, r) => s + Number(/** @type {{ platformFees?: number }} */ (r).platformFees ?? 0), 0);
+    const totalCompletedSales = revenue.reduce((s, r) => s + Number(/** @type {{ completedTransactions?: number }} */ (r).completedTransactions ?? 0), 0);
+
+    const byWeekDesc = (a, b) => String(/** @type {{ weekStart?: string }} */ (b).weekStart ?? "").localeCompare(String(/** @type {{ weekStart?: string }} */ (a).weekStart ?? ""));
+    const weeklySorted = [...weekly].sort(byWeekDesc);
+    const revenueSorted = [...revenue].sort(byWeekDesc);
+
+    const weeklyRows = weeklySorted.length
+        ? weeklySorted
               .map((r) => `<tr><td>${escapeHtml(String(r.weekStart ?? ""))}</td><td class="text-end">${escapeHtml(String(r.count ?? 0))}</td></tr>`)
               .join("")
-        : `<tr><td colspan="2" class="cdm-muted">No data yet.</td></tr>`;
+        : `<tr><td colspan="2" class="cdm-muted">No new listings in this window.</td></tr>`;
 
-    const revenueRows = revenue.length
-        ? revenue
-              .slice(0, 12)
+    const revenueRows = revenueSorted.length
+        ? revenueSorted
               .map((r) => {
                   const ws = String(r.weekStart ?? "");
                   const gross = Number(r.grossAmount ?? 0);
@@ -4169,7 +4369,7 @@ async function renderAdminDashboard() {
                   return `<tr><td>${escapeHtml(ws)}</td><td class="text-end">$${gross.toFixed(2)}</td><td class="text-end">$${fees.toFixed(2)}</td><td class="text-end">${txns}</td></tr>`;
               })
               .join("")
-        : `<tr><td colspan="4" class="cdm-muted">No completed transactions yet.</td></tr>`;
+        : `<tr><td colspan="4" class="cdm-muted">No completed transactions in this window.</td></tr>`;
 
     const lowRows = lowRated.length
         ? lowRated
@@ -4187,27 +4387,44 @@ async function renderAdminDashboard() {
               .slice(0, 100)
               .map((r) => {
                   const score = Number(r.score ?? 0);
+                  const rateeId = Number(r.rateeId ?? r.RateeId ?? 0);
+                  const onProb = Boolean(r.rateeOnProbation ?? r.RateeOnProbation);
                   const tags = [
+                      onProb ? "probation" : null,
                       r.isFlagged ? "flagged" : null,
                       r.isHarsh ? "harsh" : null,
                       score <= 3 ? "≤3★" : null,
                   ]
                       .filter(Boolean)
                       .join(", ");
+                  const profileBtn =
+                      Number.isFinite(rateeId) && rateeId > 0
+                          ? `<button type="button" class="btn btn-sm btn-outline-primary" data-admin-flagged-profile="${rateeId}">Profile</button>`
+                          : `<span class="cdm-muted small">—</span>`;
+                  const probBtn = !Number.isFinite(rateeId) || rateeId <= 0
+                      ? ""
+                      : onProb
+                        ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-admin-probation-ratee="${rateeId}" data-admin-probation-set="0">Clear probation</button>`
+                        : `<button type="button" class="btn btn-sm btn-outline-warning" data-admin-probation-ratee="${rateeId}" data-admin-probation-set="1">Probation</button>`;
                   return `<tr>
                     <td>${escapeHtml(String(r.ratingId ?? ""))}</td>
                     <td>${escapeHtml(String(r.listingId ?? ""))}</td>
                     <td>${escapeHtml(String(r.rateeId ?? ""))}</td>
                     <td class="text-end">${score}</td>
                     <td>${escapeHtml(tags)}</td>
-                    <td class="cdm-muted">${escapeHtml(String(r.comment ?? ""))}</td>
+                    <td class="cdm-muted small" style="max-width: 14rem">${escapeHtml(String(r.comment ?? ""))}</td>
+                    <td class="text-nowrap"><div class="d-flex flex-column gap-1 align-items-stretch">${profileBtn}${probBtn ? `<div>${probBtn}</div>` : ""}</div></td>
                   </tr>`;
               })
               .join("")
-        : `<tr><td colspan="6" class="cdm-muted">None.</td></tr>`;
+        : `<tr><td colspan="7" class="cdm-muted">None.</td></tr>`;
 
     const picked = Number(donation.pickedUpCount ?? 0);
     const notPicked = Number(donation.notPickedUpCount ?? 0);
+
+    const weekSelectOptions = [4, 8, 12, 26, 52]
+        .map((n) => `<option value="${n}"${n === weeksParam ? " selected" : ""}>Last ${n} weeks</option>`)
+        .join("");
 
     root.innerHTML = "";
     const shell = el(`
@@ -4233,42 +4450,124 @@ async function renderAdminDashboard() {
 
         <div class="body-content cdm-body-content">
           <div class="container-fluid cdm-max px-3 px-lg-4 py-3">
-            <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
+            <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3">
               <div>
-                <h1 class="h3 cdm-title mb-1">Admin</h1>
-                <p class="cdm-muted small mb-0">Weekly postings, revenue, reviews, and donation handoffs.</p>
+                <h1 class="h3 cdm-title mb-1">Admin dashboard</h1>
+                <p class="cdm-muted small mb-0">Activity and money in the marketplace, then trust-and-safety lists. Weeks start on Monday (UTC date from the server).</p>
+              </div>
+              <div class="d-flex flex-column align-items-stretch align-items-md-end gap-1">
+                <label class="small cdm-muted mb-0" for="admin-weeks-select">Time range</label>
+                <select class="form-select form-select-sm" id="admin-weeks-select" style="min-width: 11rem" aria-label="Dashboard time range in weeks">
+                  ${weekSelectOptions}
+                </select>
               </div>
             </div>
 
+            <p class="small cdm-muted mb-3">Totals below sum only the weeks shown in the charts (weeks with zero activity may be omitted from the API).</p>
+
+            <div class="row g-3 mb-2">
+              <div class="col-6 col-xl-3">
+                <div class="cdm-card p-3 h-100">
+                  <div class="text-uppercase cdm-muted small" style="letter-spacing: 0.04em">Gross sales</div>
+                  <div class="h4 mb-0 mt-1">$${totalGross.toFixed(2)}</div>
+                  <div class="cdm-muted small mt-1" title="Sum of completed transaction amounts in the selected window.">Paid listings only — sum of completed checkout amounts.</div>
+                </div>
+              </div>
+              <div class="col-6 col-xl-3">
+                <div class="cdm-card p-3 h-100">
+                  <div class="text-uppercase cdm-muted small" style="letter-spacing: 0.04em">Platform fees</div>
+                  <div class="h4 mb-0 mt-1">$${totalFees.toFixed(2)}</div>
+                  <div class="cdm-muted small mt-1">Marketplace fee portion recorded on completed transactions.</div>
+                </div>
+              </div>
+              <div class="col-6 col-xl-3">
+                <div class="cdm-card p-3 h-100">
+                  <div class="text-uppercase cdm-muted small" style="letter-spacing: 0.04em">Completed sales</div>
+                  <div class="h4 mb-0 mt-1">${totalCompletedSales}</div>
+                  <div class="cdm-muted small mt-1">Count of completed transactions (each checkout is one).</div>
+                </div>
+              </div>
+              <div class="col-6 col-xl-3">
+                <div class="cdm-card p-3 h-100">
+                  <div class="text-uppercase cdm-muted small" style="letter-spacing: 0.04em">New listings</div>
+                  <div class="h4 mb-0 mt-1">${totalNewListings}</div>
+                  <div class="cdm-muted small mt-1">Posts created in the window (excludes removed).</div>
+                </div>
+              </div>
+            </div>
+
+            <h2 class="h6 text-uppercase cdm-muted mb-2" style="letter-spacing: 0.06em">Trends by week</h2>
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-lg-4">
+                <div class="cdm-card p-3 h-100">
+                  <div class="fw-semibold">Revenue</div>
+                  <p class="cdm-muted small mb-2 mb-lg-3">Gross dollars from completed sales per week.</p>
+                  <div class="position-relative" style="height: 240px">
+                    <canvas id="admin-chart-revenue" role="img" aria-label="Bar chart of gross revenue per week"></canvas>
+                  </div>
+                </div>
+              </div>
+              <div class="col-12 col-lg-4">
+                <div class="cdm-card p-3 h-100">
+                  <div class="fw-semibold">Sales volume</div>
+                  <p class="cdm-muted small mb-2 mb-lg-3">How many checkouts completed each week.</p>
+                  <div class="position-relative" style="height: 240px">
+                    <canvas id="admin-chart-sales" role="img" aria-label="Bar chart of completed sales count per week"></canvas>
+                  </div>
+                </div>
+              </div>
+              <div class="col-12 col-lg-4">
+                <div class="cdm-card p-3 h-100">
+                  <div class="fw-semibold">New listings</div>
+                  <p class="cdm-muted small mb-2 mb-lg-3">New posts created each week.</p>
+                  <div class="position-relative" style="height: 240px">
+                    <canvas id="admin-chart-listings" role="img" aria-label="Bar chart of new listings per week"></canvas>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion mb-4" id="admin-tables-accordion">
+              <div class="accordion-item border cdm-card overflow-hidden">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed py-3" type="button" data-bs-toggle="collapse" data-bs-target="#admin-collapse-weekly-tables" aria-expanded="false" aria-controls="admin-collapse-weekly-tables">
+                    Weekly numbers (tables)
+                  </button>
+                </h2>
+                <div id="admin-collapse-weekly-tables" class="accordion-collapse collapse" data-bs-parent="#admin-tables-accordion">
+                  <div class="accordion-body pt-0">
+                    <div class="row g-3">
+                      <div class="col-12 col-lg-6">
+                        <div class="fw-semibold small mb-2">New listings by week</div>
+                        <div class="table-responsive border rounded">
+                          <table class="table table-sm align-middle mb-0">
+                            <thead class="table-light"><tr><th>Week start</th><th class="text-end">Listings</th></tr></thead>
+                            <tbody>${weeklyRows}</tbody>
+                          </table>
+                        </div>
+                      </div>
+                      <div class="col-12 col-lg-6">
+                        <div class="fw-semibold small mb-2">Revenue by week</div>
+                        <div class="table-responsive border rounded">
+                          <table class="table table-sm align-middle mb-0">
+                            <thead class="table-light"><tr><th>Week start</th><th class="text-end">Gross</th><th class="text-end">Fees</th><th class="text-end">Sales</th></tr></thead>
+                            <tbody>${revenueRows}</tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <h2 class="h6 text-uppercase cdm-muted mb-2" style="letter-spacing: 0.06em">Donations &amp; trust</h2>
             <div class="row g-3">
-              <div class="col-12 col-lg-6">
-                <div class="cdm-card p-4">
-                  <div class="fw-semibold mb-2">New postings per week</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle mb-0">
-                      <thead><tr><th>Week start</th><th class="text-end">Listings</th></tr></thead>
-                      <tbody>${weeklyRows}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <div class="col-12 col-lg-6">
-                <div class="cdm-card p-4">
-                  <div class="fw-semibold mb-2">Revenue (completed transactions)</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle mb-0">
-                      <thead><tr><th>Week start</th><th class="text-end">Gross</th><th class="text-end">Fees</th><th class="text-end">Txns</th></tr></thead>
-                      <tbody>${revenueRows}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
               <div class="col-12 col-lg-4">
                 <div class="cdm-card p-4">
-                  <div class="fw-semibold mb-2">Donations picked up</div>
-                  <div class="d-flex align-items-end justify-content-between">
+                  <div class="fw-semibold mb-2">Donation handoffs</div>
+                  <p class="cdm-muted small">Free listings: whether the buyer marked pickup (requires DB column).</p>
+                  <div class="d-flex align-items-end justify-content-between mt-3">
                     <div>
                       <div class="display-6 fw-bold">${picked}</div>
                       <div class="cdm-muted small">Picked up</div>
@@ -4278,16 +4577,17 @@ async function renderAdminDashboard() {
                       <div class="cdm-muted small">Not picked up</div>
                     </div>
                   </div>
-                  <div class="cdm-muted small mt-3">Requires <code>listings.donation_handed_off_at</code> column.</div>
+                  <div class="cdm-muted small mt-3">Uses <code>listings.donation_handed_off_at</code> when present.</div>
                 </div>
               </div>
 
               <div class="col-12 col-lg-8">
                 <div class="cdm-card p-4">
-                  <div class="fw-semibold mb-2">Low-rated users (≤ 3.0 avg)</div>
+                  <div class="fw-semibold mb-1">Low-rated sellers</div>
+                  <p class="cdm-muted small mb-2">Users with average received rating ≤ 3.0 (all time — not filtered by the week control).</p>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0">
-                      <thead><tr><th>User</th><th>Name</th><th class="text-end">Avg</th><th class="text-end">Count</th></tr></thead>
+                      <thead><tr><th>User</th><th>Name</th><th class="text-end">Avg</th><th class="text-end">Ratings</th></tr></thead>
                       <tbody>${lowRows}</tbody>
                     </table>
                   </div>
@@ -4296,14 +4596,15 @@ async function renderAdminDashboard() {
 
               <div class="col-12">
                 <div class="cdm-card p-4">
-                  <div class="fw-semibold mb-2">Flagged / harsh / ≤3★ reviews</div>
+                  <div class="fw-semibold mb-1">Reviews to review</div>
+                  <p class="cdm-muted small mb-2">Flagged, harsh, or very low star ratings (all time).</p>
                   <div class="table-responsive">
-                    <table class="table table-sm align-middle mb-0">
-                      <thead><tr><th>ID</th><th>Listing</th><th>Ratee</th><th class="text-end">★</th><th>Tags</th><th>Comment</th></tr></thead>
+                    <table class="table table-sm align-middle mb-0" id="admin-flagged-reviews-table">
+                      <thead><tr><th>ID</th><th>Listing</th><th>Ratee</th><th class="text-end">★</th><th>Tags</th><th>Comment</th><th>Actions</th></tr></thead>
                       <tbody>${flaggedRows}</tbody>
                     </table>
                   </div>
-                  <div class="cdm-muted small mt-3">Flag fields require <code>ratings.is_flagged</code> + <code>ratings.is_harsh</code>.</div>
+                  <div class="cdm-muted small mt-3">Probation uses <code>users.on_probation</code> (run <code>database/alter_users_on_probation.sql</code>). Flag signals need <code>ratings.is_flagged</code> / <code>ratings.is_harsh</code>.</div>
                 </div>
               </div>
             </div>
@@ -4316,6 +4617,63 @@ async function renderAdminDashboard() {
     wireNav(shell);
     ensureAuthUi();
     syncSavedCountBadges(shell);
+
+    mountAdminDashboardCharts(shell, buildAdminWeekSeries(weekly, revenue));
+
+    shell.querySelector("#admin-weeks-select")?.addEventListener("change", (e) => {
+        const t = /** @type {HTMLSelectElement} */ (e.target);
+        const n = parseInt(String(t.value), 10);
+        if (n >= 1 && n <= 52) {
+            state.adminDashboardWeeks = n;
+            void renderAdminDashboard();
+        }
+    });
+
+    shell.querySelector("#admin-flagged-reviews-table")?.addEventListener("click", (e) => {
+        const t = e.target;
+        if (!(t instanceof HTMLElement)) return;
+        const profBtn = t.closest("[data-admin-flagged-profile]");
+        if (profBtn instanceof HTMLButtonElement) {
+            e.preventDefault();
+            const id = Number(profBtn.getAttribute("data-admin-flagged-profile"));
+            if (!Number.isFinite(id) || id <= 0) return;
+            state.sellerProfileUserId = id;
+            navigate("seller-profile");
+            return;
+        }
+        const probBtn = t.closest("[data-admin-probation-ratee]");
+        if (!(probBtn instanceof HTMLButtonElement)) return;
+        e.preventDefault();
+        const uid = Number(probBtn.getAttribute("data-admin-probation-ratee"));
+        const setOn = probBtn.getAttribute("data-admin-probation-set") === "1";
+        if (!Number.isFinite(uid) || uid <= 0) return;
+        void (async () => {
+            const pw = getAdminSessionPassword();
+            if (!pw) return;
+            probBtn.disabled = true;
+            try {
+                const res = await fetch(`${API_BASE}/api/admin/users/${encodeURIComponent(String(uid))}/probation`, {
+                    method: "PUT",
+                    headers: {
+                        Accept: "application/json",
+                        "Content-Type": "application/json",
+                        "X-Admin-Password": pw,
+                    },
+                    body: JSON.stringify({ onProbation: setOn }),
+                });
+                if (!res.ok) {
+                    const txt = await res.text().catch(() => "");
+                    alert(txt || `Could not update (${res.status}).`);
+                    probBtn.disabled = false;
+                    return;
+                }
+                await renderAdminDashboard();
+            } catch (_) {
+                alert("Network error.");
+                probBtn.disabled = false;
+            }
+        })();
+    });
 
     shell.querySelector("#admin-logout")?.addEventListener("click", () => {
         adminLogoutToHome();
@@ -5151,6 +5509,129 @@ async function renderSaved() {
     });
 }
 
+/** e.g. 99 → "99th" for percentile copy. */
+function ordinalEnglish(n) {
+    const v = Math.max(0, Math.min(100, Math.round(Number(n))));
+    const j = v % 10;
+    const k = v % 100;
+    if (j === 1 && k !== 11) return `${v}st`;
+    if (j === 2 && k !== 12) return `${v}nd`;
+    if (j === 3 && k !== 13) return `${v}rd`;
+    return `${v}th`;
+}
+
+/** One-line copy for seller avg-rating percentile from API. */
+function sellerRatingPercentileLine(pctRaw, peerCount) {
+    const pct = Number(pctRaw);
+    const peers = Number(peerCount);
+    if (!Number.isFinite(pct) || !Number.isFinite(peers) || peers < 1) return "";
+    const rounded = Math.max(0, Math.min(100, Math.round(pct)));
+    return `~${ordinalEnglish(rounded)} percentile vs other sellers (avg rating, n=${peers})`;
+}
+
+function renderStars(avgScore) {
+    const n = Number(avgScore);
+    const clamped = Number.isFinite(n) ? Math.max(0, Math.min(5, n)) : 0;
+    const full = Math.floor(clamped + 1e-9);
+    const half = clamped - full >= 0.5 ? 1 : 0;
+    const empty = Math.max(0, 5 - full - half);
+    return `${"★".repeat(full)}${half ? "½" : ""}${"☆".repeat(empty)}`;
+}
+
+function sellerProfileListingCardHtml(item, status) {
+    const badge =
+        String(status || "").toLowerCase() === "sold"
+            ? `<span class="badge text-bg-secondary position-absolute top-0 start-0 m-2">Sold</span>`
+            : "";
+
+    const title = escapeHtml(item.title);
+    const blurb = escapeHtml(item.blurb);
+    const price = escapeHtml(item.priceLabel);
+    const key = escapeHtml(item.key);
+    const fb = encodeURIComponent(item.title || "Listing");
+    const saved = state.savedListingKeys.has(item.key);
+    const saveBtn = `
+        <button
+            type="button"
+            class="btn btn-sm btn-light cdm-save-btn cdm-save-btn--corner ${saved ? "cdm-save-btn--on" : ""}"
+            data-action="toggle-save"
+            data-listing-key="${key}"
+            aria-pressed="${saved ? "true" : "false"}"
+            title="${saved ? "Unsave" : "Save"}"
+        >${saved ? "★" : "☆"}</button>`;
+    const thumbImg = item.photoDataUrl
+        ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+        : "";
+
+    return `
+        <div class="col-12 col-md-6 col-xl-6">
+            <div class="cdm-card cdm-listing-card position-relative">
+                <div class="cdm-listing-thumb">${thumbImg}${saveBtn}${badge}</div>
+                <div class="p-3">
+                    <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="${key}">${title}</button>
+                    <div class="cdm-muted small">${blurb}</div>
+                    <div class="mt-2 d-flex align-items-center justify-content-between">
+                        <div class="fw-semibold">${price}</div>
+                        <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function sellerReviewHtml(r) {
+    const score = Number(r.score ?? r.Score ?? 0);
+    const stars = renderStars(score);
+    const who = escapeHtml(String(r.raterDisplayName ?? r.RaterDisplayName ?? `User #${r.raterId ?? r.RaterId ?? ""}`));
+    const commentRaw = String(r.comment ?? r.Comment ?? "").trim();
+    const comment = commentRaw ? escapeHtml(commentRaw) : "";
+    const createdAt = String(r.createdAt ?? r.CreatedAt ?? "").trim();
+    const date = createdAt ? escapeHtml(createdAt.slice(0, 10)) : "";
+    return `
+        <div class="border rounded-3 p-3 bg-white">
+            <div class="d-flex justify-content-between align-items-start gap-2">
+                <div class="fw-semibold">${who}</div>
+                <div class="text-nowrap small">${escapeHtml(stars)} <span class="cdm-muted">${escapeHtml(String(score || ""))}</span></div>
+            </div>
+            ${comment ? `<div class="mt-2">${comment}</div>` : `<div class="mt-2 cdm-muted small">No comment.</div>`}
+            ${date ? `<div class="mt-2 cdm-muted small">${date}</div>` : ""}
+        </div>
+    `;
+}
+
+function gapSolutionLabel(raw) {
+    const g = String(raw || "").trim().toLowerCase();
+    if (g === "storage") return "Storage";
+    if (g === "pickup_window") return "Pickup window";
+    if (g === "ship_or_deliver") return "Ship / deliver";
+    return raw == null ? "" : String(raw);
+}
+
+function buildSellerProfileFacts(u) {
+    const phone = String(u.phone ?? u.Phone ?? "").trim();
+    const moveIn = String(u.moveInDate ?? u.MoveInDate ?? "").trim();
+    const moveOut = String(u.moveOutDate ?? u.MoveOutDate ?? "").trim();
+    const defaultGap = String(u.defaultGapSolution ?? u.DefaultGapSolution ?? "").trim();
+    const preferredGap = String(u.preferredReceiveGap ?? u.PreferredReceiveGap ?? "").trim();
+    const createdAt = String(u.createdAt ?? u.CreatedAt ?? "").trim();
+
+    const rows = [
+        phone ? { k: "Phone", v: phone } : null,
+        moveIn ? { k: "Move-in", v: moveIn.slice(0, 10) } : null,
+        moveOut ? { k: "Move-out", v: moveOut.slice(0, 10) } : null,
+        defaultGap ? { k: "Seller default handoff", v: gapSolutionLabel(defaultGap) } : null,
+        preferredGap ? { k: "Buyer preference", v: gapSolutionLabel(preferredGap) } : null,
+        createdAt ? { k: "Joined", v: createdAt.slice(0, 10) } : null,
+    ].filter(Boolean);
+
+    if (!rows.length) return `<div class="cdm-muted">No profile details on file.</div>`;
+
+    return rows
+        .map((x) => `<div class="d-flex justify-content-between gap-3 py-1"><div class="cdm-muted">${escapeHtml(x.k)}</div><div class="text-end">${escapeHtml(x.v)}</div></div>`)
+        .join("");
+}
+
 async function renderSellerProfile() {
     const root = document.getElementById("app");
     const uid = Number(state.sellerProfileUserId);
@@ -5160,18 +5641,76 @@ async function renderSellerProfile() {
     }
 
     root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading seller…</div></div>`;
-    const { res, data } = await apiJson(`/api/users/${encodeURIComponent(String(uid))}/public`);
+    const { res, data } = await apiJson(
+        `/api/users/${encodeURIComponent(String(uid))}/seller?listingLimit=90&reviewLimit=30&minRatingsForPercentile=1`,
+    );
     if (!res.ok) {
         root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Seller not found.</div></div>`;
         return;
     }
 
-    const name = escapeHtml(data.displayName ?? data.DisplayName ?? "Seller");
-    const dorm = String(data.dormBuilding ?? data.DormBuilding ?? "").trim();
-    const suite = String(data.suiteLetter ?? data.SuiteLetter ?? "").trim();
-    const onCampus = Boolean(data.livesOnCampus ?? data.LivesOnCampus);
-    const avatar = resolveAvatarSrc(data.avatarUrl ?? data.AvatarUrl ?? null);
+    const u = data.user ?? data.User ?? data;
+    const rating = data.rating ?? data.Rating ?? {};
+    const reviews = Array.isArray(data.reviews ?? data.Reviews) ? (data.reviews ?? data.Reviews) : [];
+    const listingsRaw = Array.isArray(data.listings ?? data.Listings) ? (data.listings ?? data.Listings) : [];
+
+    const name = escapeHtml(u.displayName ?? u.DisplayName ?? "Seller");
+    const dorm = String(u.dormBuilding ?? u.DormBuilding ?? "").trim();
+    const suite = String(u.suiteLetter ?? u.SuiteLetter ?? "").trim();
+    const onCampus = Boolean(u.livesOnCampus ?? u.LivesOnCampus);
+    const avatar = resolveAvatarSrc(u.avatarUrl ?? u.AvatarUrl ?? null);
     const locBits = [onCampus ? "On campus" : "Off campus", dorm || null, suite ? `Suite ${suite}` : null].filter(Boolean);
+
+    const avg = Number(rating.averageScore ?? rating.AverageScore ?? 0);
+    const ratingCount = Number(rating.ratingCount ?? rating.RatingCount ?? 0);
+    const avgFixed = Number.isFinite(avg) ? avg.toFixed(2) : "0.00";
+    const stars = renderStars(avg);
+    const pctRaw = data.ratingAveragePercentile ?? data.RatingAveragePercentile;
+    const peerSellers = data.ratingPercentilePeerSellerCount ?? data.RatingPercentilePeerSellerCount;
+    const pctLine = sellerRatingPercentileLine(pctRaw, peerSellers);
+    /** Avg is on 1–5 stars; treat ~5.0 as “perfect” for copy (float-safe). */
+    const isTopSellerPerfect = ratingCount >= 1 && Number.isFinite(avg) && avg >= 4.999;
+    let reputationSublineHtml = "";
+    if (isTopSellerPerfect) {
+        const rd = ratingCount === 1 ? "rating" : "ratings";
+        reputationSublineHtml = `<div class="small mt-2 d-flex flex-wrap align-items-center gap-2">
+            <span class="badge text-bg-success fw-semibold">Top seller</span>
+            <span class="cdm-muted">Perfect 5★ average across ${escapeHtml(String(ratingCount))} ${rd}</span>
+        </div>`;
+    } else if (pctLine) {
+        reputationSublineHtml = `<div class="cdm-muted small mt-2">${escapeHtml(pctLine)}</div>`;
+    } else if (ratingCount > 0) {
+        reputationSublineHtml = `<div class="cdm-muted small mt-2">Percentile vs other sellers isn’t available yet (need more rated sellers in the pool).</div>`;
+    }
+
+    const sellerListings = listingsRaw.map((row) => {
+        const item = homeFeedItemFromDbListingApiRow(row);
+        const status = String(row.status ?? row.Status ?? "").toLowerCase();
+        return { row, item, status };
+    });
+    const activeListings = sellerListings.filter((x) => x.status !== "sold");
+    const soldListings = sellerListings.filter((x) => x.status === "sold");
+
+    const activeGridHtml = activeListings.length
+        ? activeListings.map((x) => sellerProfileListingCardHtml(x.item, x.status)).join("")
+        : `<div class="cdm-card p-5 text-center cdm-muted">No active listings.</div>`;
+    const soldGridHtml = soldListings.length
+        ? soldListings.map((x) => sellerProfileListingCardHtml(x.item, x.status)).join("")
+        : `<div class="cdm-card p-5 text-center cdm-muted">No sold listings yet.</div>`;
+
+    const reviewsHtml = reviews.length
+        ? reviews
+              .slice(0, 30)
+              .map((r) => sellerReviewHtml(r))
+              .join("")
+        : `<div class="cdm-card p-4 text-center cdm-muted">No ratings yet.</div>`;
+
+    const profileFacts = buildSellerProfileFacts(u);
+
+    const onProbation = Boolean(u.onProbation ?? u.OnProbation);
+    const probationBannerHtml = onProbation
+        ? `<div class="alert alert-warning py-2 px-3 mb-4 border-warning"><strong>Administrative probation.</strong> This account cannot create or edit listings until staff clears probation.</div>`
+        : "";
 
     root.innerHTML = "";
     const shell = el(`
@@ -5198,12 +5737,61 @@ async function renderSellerProfile() {
           <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
             <button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="go-home">← Back</button>
             <div class="cdm-surface p-4 p-lg-5 mt-2">
+              ${probationBannerHtml}
               <div class="d-flex flex-wrap align-items-center gap-3">
                 <img class="rounded-circle border bg-white" src="${escapeAttrForDoubleQuoted(avatar)}" width="72" height="72" alt="" style="object-fit:cover" />
                 <div class="min-w-0">
                   <h1 class="h3 cdm-title mb-1">${name}</h1>
                   <div class="cdm-muted small">${escapeHtml(locBits.join(" · ") || "")}</div>
+                  <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
+                    <span class="badge text-bg-dark">${escapeHtml(stars)} ${escapeHtml(avgFixed)}</span>
+                    <span class="cdm-muted small">${escapeHtml(String(ratingCount))} rating${ratingCount === 1 ? "" : "s"}</span>
+                  </div>
+                  ${reputationSublineHtml}
                 </div>
+              </div>
+            </div>
+
+            <div class="row g-3 mt-1">
+              <div class="col-12 col-lg-5">
+                <div class="cdm-card p-4">
+                  <div class="fw-semibold mb-2">Profile</div>
+                  <div class="small">${profileFacts}</div>
+                </div>
+
+                <div class="cdm-card p-4 mt-3">
+                  <div class="fw-semibold mb-2">Ratings</div>
+                  <div class="d-flex align-items-center justify-content-between">
+                    <div>
+                      <div class="h4 mb-0">${escapeHtml(avgFixed)}</div>
+                      <div class="cdm-muted small">${escapeHtml(stars)} · ${escapeHtml(String(ratingCount))} total</div>
+                      ${reputationSublineHtml}
+                    </div>
+                  </div>
+                  <div class="mt-3 d-flex flex-column gap-2" id="seller-reviews">
+                    ${reviewsHtml}
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-lg-7">
+                <div class="d-flex align-items-end justify-content-between gap-2 mb-2">
+                  <div>
+                    <div class="cdm-section-title">Listings</div>
+                    <div class="fw-semibold">Active</div>
+                    <div class="cdm-muted small">${activeListings.length} item${activeListings.length === 1 ? "" : "s"}</div>
+                  </div>
+                </div>
+                <div class="row g-3" id="seller-active-grid">${activeGridHtml}</div>
+
+                <div class="d-flex align-items-end justify-content-between gap-2 mt-4 mb-2">
+                  <div>
+                    <div class="cdm-section-title">History</div>
+                    <div class="fw-semibold">Sold</div>
+                    <div class="cdm-muted small">${soldListings.length} item${soldListings.length === 1 ? "" : "s"}</div>
+                  </div>
+                </div>
+                <div class="row g-3" id="seller-sold-grid">${soldGridHtml}</div>
               </div>
             </div>
           </div>
@@ -5214,6 +5802,9 @@ async function renderSellerProfile() {
     root.appendChild(shell);
     wireNav(shell);
     ensureAuthUi();
+    hydrateFeedListingImages(shell);
+    wireFeedCardButtons(shell);
+    wireListingImageFallbacks(shell);
     syncSavedCountBadges(shell);
 }
 
@@ -5859,9 +6450,12 @@ function resolveListingByKey(key) {
     return null;
 }
 
-function renderListingDbFromApi(L) {
+function renderListingDbFromApi(L, extra = null) {
     const root = document.getElementById("app");
     root.innerHTML = "";
+
+    const listingReviews = Array.isArray(extra?.listingReviews) ? extra.listingReviews : [];
+    const sellerRating = extra?.sellerRating && typeof extra.sellerRating === "object" ? extra.sellerRating : {};
 
     const priceNum = Number(L.price);
     const priceHtml =
@@ -5876,8 +6470,13 @@ function renderListingDbFromApi(L) {
             ? ` · <span class="text-body">${escapeHtml(formatListingCondition(conditionRaw))}</span>`
             : "";
     const subtitleHtml = `${escapeHtml(L.category || "Listing")} · <span class="text-body">${escapeHtml(L.sellerDisplayName || "Seller")}</span>${condSubtitle}`;
+    const createdRaw = L.createdAt ?? L.CreatedAt ?? null;
     const posted =
-        L.createdAt != null ? escapeHtml(new Date(L.createdAt).toLocaleString()) : "—";
+        createdRaw != null && String(createdRaw).trim() !== ""
+            ? escapeHtml(new Date(createdRaw).toLocaleString())
+            : "—";
+    const spaceRaw = L.spaceSuitability ?? L.SpaceSuitability ?? null;
+    const spaceK = spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
     const fromFeed = state.feedMatchScoreByListingId?.[String(L.listingId)];
     const matchScore =
         fromFeed != null && Number.isFinite(fromFeed)
@@ -5919,8 +6518,6 @@ function renderListingDbFromApi(L) {
             ? `<dt class="col-5 col-sm-4 cdm-muted">Dimensions</dt>
         <dd class="col-7 col-sm-8 mb-2">${escapeHtml(String(dimensionsRaw).trim())}</dd>`
             : "";
-    const spaceRaw = L.spaceSuitability ?? L.SpaceSuitability ?? null;
-    const spaceK = spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
     const spaceRow =
         spaceK != null
             ? `<dt class="col-5 col-sm-4 cdm-muted">Space fit</dt>
@@ -5943,9 +6540,28 @@ function renderListingDbFromApi(L) {
     const myUid = parseJwtSub(state.token);
     const isOwnListing =
         myUid != null && sellerNumeric != null && Number(sellerNumeric) === myUid;
-    const primaryCtaHtml = isOwnListing
-        ? `<p class="small text-muted border rounded px-3 py-2 mb-0 mt-3">This is your listing — it isn’t shown on your home feed to buyers. Edit it from <strong>My listings</strong>.</p>`
-        : `<button class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-3" type="button" data-action="buy-item" data-listing-key="db:${escapeHtml(String(L.listingId))}">Claim / Buy</button>
+    const statusLower = String(L.status ?? L.Status ?? "").toLowerCase();
+    const isSold = statusLower === "sold";
+
+    let primaryCtaHtml;
+    let footNoteHtml;
+    if (isOwnListing) {
+        primaryCtaHtml = `<p class="small text-muted border rounded px-3 py-2 mb-0 mt-3">This is your listing — it isn’t shown on your home feed to buyers. Edit it from <strong>My listings</strong>.</p>`;
+        footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Share the link or wait for buyers to find this on the public feed.</p>`;
+    } else if (isSold) {
+        const sidAttr = Number.isFinite(sellerId) && sellerId > 0 ? String(sellerId) : "";
+        primaryCtaHtml = `<div class="alert alert-secondary border mb-0 mt-3" role="status">
+            <div class="fw-semibold mb-1">This listing is sold</div>
+            <div class="small text-muted mb-2">Full details stay visible. See the seller’s overall rating and any reviews for this item below.</div>
+            ${
+                sidAttr
+                    ? `<button type="button" class="btn btn-outline-dark btn-sm" data-action="view-seller" data-seller-id="${escapeAttrForDoubleQuoted(sidAttr)}">View seller profile</button>`
+                    : ""
+            }
+          </div>`;
+        footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Purchases are no longer available for this listing.</p>`;
+    } else {
+        primaryCtaHtml = `<button class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-3" type="button" data-action="buy-item" data-listing-key="db:${escapeHtml(String(L.listingId))}">Claim / Buy</button>
            <button
              class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-2"
              type="button"
@@ -5955,10 +6571,26 @@ function renderListingDbFromApi(L) {
              data-seller-id="${escapeAttrForDoubleQuoted(String(Number.isFinite(sellerId) ? sellerId : ""))}"
              data-seller-name="${escapeAttrForDoubleQuoted(String(L.sellerDisplayName || "Seller"))}"
            >Message seller</button>`;
+        footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Message the seller after claiming to finalize handoff.</p>`;
+    }
 
-    const footNoteHtml = isOwnListing
-        ? `<p class="small text-muted border-top pt-3 mt-3 mb-0">Share the link or wait for buyers to find this on the public feed.</p>`
-        : `<p class="small text-muted border-top pt-3 mt-3 mb-0">Message the seller after claiming to finalize handoff.</p>`;
+    const sellerAvg = Number(sellerRating.averageScore ?? sellerRating.AverageScore ?? 0);
+    const sellerRc = Number(sellerRating.ratingCount ?? sellerRating.RatingCount ?? 0);
+    const sellerAvgTxt = Number.isFinite(sellerAvg) ? sellerAvg.toFixed(2) : "0.00";
+    const reviewsForItemHtml = listingReviews.length
+        ? listingReviews.map((r) => sellerReviewHtml(r)).join("")
+        : `<p class="cdm-muted small mb-0">No reviews for this listing yet.</p>`;
+    const reputationHtml = `
+      <div class="mt-4 pt-3 border-top">
+        <h3 class="h6 text-uppercase cdm-muted small mb-2">Seller reputation</h3>
+        <p class="mb-3">
+          <span class="fw-semibold me-1">${escapeHtml(renderStars(sellerAvg))}</span>
+          <span class="text-dark">${escapeHtml(sellerAvgTxt)}</span>
+          <span class="cdm-muted small"> · ${escapeHtml(String(sellerRc))} rating${sellerRc === 1 ? "" : "s"} total</span>
+        </p>
+        <div class="fw-semibold small mb-2">Reviews for this item</div>
+        <div class="d-flex flex-column gap-2">${reviewsForItemHtml}</div>
+      </div>`;
 
     const fulfillmentHtml = fulfillmentBlockHtml(L);
 
@@ -5974,6 +6606,7 @@ function renderListingDbFromApi(L) {
       </div>
       <h3 class="h6 text-uppercase cdm-muted small mb-2 mt-4 cdm-listing-specifics-head">Delivery &amp; pickup</h3>
       <p class="small text-body mb-0">${escapeHtml(fulfillmentSummaryText(L))}</p>
+      ${reputationHtml}
     `;
 
     const body = listingDetailLayoutEbay({
@@ -6138,10 +6771,28 @@ async function renderListing() {
         );
         root.appendChild(loading);
         try {
-            const res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(rawId)}`);
-            if (!res.ok) throw new Error("not found");
-            const L = await res.json();
-            renderListingDbFromApi(L);
+            let res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(rawId)}/context`, {
+                headers: { Accept: "application/json" },
+            });
+            let listingReviews = [];
+            let sellerRating = {};
+            let L;
+            if (res.ok) {
+                const ctx = await res.json();
+                L = ctx.listing ?? ctx.Listing;
+                listingReviews = Array.isArray(ctx.listingReviews ?? ctx.ListingReviews)
+                    ? (ctx.listingReviews ?? ctx.ListingReviews)
+                    : [];
+                sellerRating = ctx.sellerRatingSummary ?? ctx.SellerRatingSummary ?? {};
+            } else {
+                res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(rawId)}`, {
+                    headers: { Accept: "application/json" },
+                });
+                if (!res.ok) throw new Error("not found");
+                L = await res.json();
+            }
+            if (!L) throw new Error("not found");
+            renderListingDbFromApi(L, { listingReviews, sellerRating });
         } catch {
             root.innerHTML = "";
             const prev = state.listingKey;

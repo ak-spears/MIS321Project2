@@ -14,11 +14,19 @@ public sealed class ListingsController : ControllerBase
 {
     private readonly ListingRepository _listings;
     private readonly ListingMatchService _listingMatchService;
+    private readonly RatingRepository _ratings;
+    private readonly UserRepository _users;
 
-    public ListingsController(ListingRepository listings, ListingMatchService listingMatchService)
+    public ListingsController(
+        ListingRepository listings,
+        ListingMatchService listingMatchService,
+        RatingRepository ratings,
+        UserRepository users)
     {
         _listings = listings;
         _listingMatchService = listingMatchService;
+        _ratings = ratings;
+        _users = users;
     }
 
     /// <summary>
@@ -37,9 +45,9 @@ public sealed class ListingsController : ControllerBase
             limit = 24;
         }
 
-        if (limit > 100)
+        if (limit > 250)
         {
-            limit = 100;
+            limit = 250;
         }
 
         int? excludeSellerId = null;
@@ -159,6 +167,13 @@ public sealed class ListingsController : ControllerBase
             return Unauthorized();
         }
 
+        if (await _users.IsUserOnProbationAsync(userId, cancellationToken))
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                "This account is on administrative probation and cannot post or edit listings.");
+        }
+
         var newId = await _listings.InsertAsync(userId, request, cancellationToken);
         if (newId is null)
         {
@@ -226,6 +241,13 @@ public sealed class ListingsController : ControllerBase
             return Unauthorized();
         }
 
+        if (await _users.IsUserOnProbationAsync(userId, cancellationToken))
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                "This account is on administrative probation and cannot post or edit listings.");
+        }
+
         var ok = await _listings.UpdateMineAsync(userId, id, request, cancellationToken);
         if (!ok)
         {
@@ -257,6 +279,29 @@ public sealed class ListingsController : ControllerBase
 
         var ok = await _listings.DeleteMineAsync(userId, id, cancellationToken);
         return ok ? NoContent() : NotFound();
+    }
+
+    /// <summary>Listing detail plus reviews for this listing and the seller&apos;s overall rating (SPA).</summary>
+    [AllowAnonymous]
+    [HttpGet("{id:int}/context")]
+    [ProducesResponseType(typeof(ListingDetailContextDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ListingDetailContextDto>> GetListingContext(int id, CancellationToken cancellationToken = default)
+    {
+        var listing = await _listings.GetByIdAsync(id, cancellationToken);
+        if (listing is null)
+        {
+            return NotFound();
+        }
+
+        var listingReviews = await _ratings.GetForListingAsync(id, cancellationToken);
+        var sellerRating = await _ratings.GetSummaryForUserAsync(listing.SellerId, cancellationToken);
+        return Ok(new ListingDetailContextDto
+        {
+            Listing = listing,
+            ListingReviews = listingReviews,
+            SellerRatingSummary = sellerRating,
+        });
     }
 
     [AllowAnonymous]

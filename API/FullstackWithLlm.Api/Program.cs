@@ -28,6 +28,7 @@ builder.Services.AddScoped<UserRepository>();
 builder.Services.AddScoped<ListingRepository>();
 builder.Services.AddScoped<TransactionRepository>();
 builder.Services.AddScoped<AdminRepository>();
+builder.Services.AddScoped<RatingRepository>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton<AiListingFromImageService>();
 builder.Services.AddHttpClient<AiListingDescriptionService>();

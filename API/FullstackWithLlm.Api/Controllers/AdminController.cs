@@ -9,11 +9,13 @@ namespace FullstackWithLlm.Api.Controllers;
 public sealed class AdminController : ControllerBase
 {
     private readonly AdminRepository _admin;
+    private readonly UserRepository _users;
     private readonly IConfiguration _config;
 
-    public AdminController(AdminRepository admin, IConfiguration config)
+    public AdminController(AdminRepository admin, UserRepository users, IConfiguration config)
     {
         _admin = admin;
+        _users = users;
         _config = config;
     }
 
@@ -41,6 +43,36 @@ public sealed class AdminController : ControllerBase
 
         var dto = await _admin.GetDashboardAsync(weeks, cancellationToken);
         return Ok(dto);
+    }
+
+    /// <summary>Mark a user as on administrative probation (blocks new/edited listings) or clear it.</summary>
+    [HttpPut("users/{id:int}/probation")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetUserProbation(
+        int id,
+        [FromBody] SetUserProbationRequestDto? body,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsAdminAuthed())
+        {
+            return Unauthorized();
+        }
+
+        if (id <= 0 || body is null)
+        {
+            return BadRequest();
+        }
+
+        var ok = await _users.SetUserProbationAsync(id, body.OnProbation, cancellationToken);
+        if (!ok)
+        {
+            return NotFound("User not found, or users.on_probation column is missing (run database/alter_users_on_probation.sql).");
+        }
+
+        return NoContent();
     }
 }
 

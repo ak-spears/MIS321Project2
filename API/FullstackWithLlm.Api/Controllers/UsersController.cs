@@ -13,10 +13,14 @@ public sealed class UsersController : ControllerBase
     private static readonly HashSet<char> ValidSuiteLetters = new() { 'A', 'B', 'C', 'D' };
 
     private readonly UserRepository _users;
+    private readonly ListingRepository _listings;
+    private readonly RatingRepository _ratings;
 
-    public UsersController(UserRepository users)
+    public UsersController(UserRepository users, ListingRepository listings, RatingRepository ratings)
     {
         _users = users;
+        _listings = listings;
+        _ratings = ratings;
     }
 
     [Authorize]
@@ -144,6 +148,57 @@ public sealed class UsersController : ControllerBase
         }
 
         return Ok(profile);
+    }
+
+    [AllowAnonymous]
+    [HttpGet("{id:int}/seller")]
+    [ProducesResponseType(typeof(SellerProfileDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<SellerProfileDto>> GetSellerProfile(
+        int id,
+        [FromQuery] int listingLimit = 60,
+        [FromQuery] int reviewLimit = 20,
+        [FromQuery] int minRatingsForPercentile = 1,
+        CancellationToken cancellationToken = default)
+    {
+        if (id <= 0)
+        {
+            return NotFound();
+        }
+
+        if (minRatingsForPercentile < 1)
+        {
+            minRatingsForPercentile = 1;
+        }
+
+        if (minRatingsForPercentile > 50)
+        {
+            minRatingsForPercentile = 50;
+        }
+
+        var user = await _users.GetSellerProfileByIdAsync(id, cancellationToken);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        var listings = await _listings.GetMineAsync(id, listingLimit, cancellationToken);
+        var rating = await _ratings.GetSummaryForUserAsync(id, cancellationToken);
+        var reviews = await _ratings.GetRecentForUserAsync(id, reviewLimit, cancellationToken);
+        var (pct, peerSellers) = await _ratings.GetSellerAverageRatingPercentileAmongSellersAsync(
+            id,
+            minRatingsForPercentile,
+            cancellationToken);
+
+        return Ok(new SellerProfileDto
+        {
+            User = user,
+            Listings = listings,
+            Rating = rating,
+            Reviews = reviews,
+            RatingAveragePercentile = pct,
+            RatingPercentilePeerSellerCount = peerSellers,
+        });
     }
 }
 

@@ -301,6 +301,172 @@ public sealed class UserRepository
         };
     }
 
+    public async Task<SellerUserDto?> GetSellerProfileByIdAsync(int userId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        const string sqlFull = """
+            SELECT
+                user_id,
+                campus_id,
+                display_name,
+                phone,
+                lives_on_campus,
+                NULLIF(move_in_date, '0000-00-00') AS move_in_date,
+                NULLIF(move_out_date, '0000-00-00') AS move_out_date,
+                dorm_building,
+                suite_letter,
+                avatar_url,
+                default_gap_solution,
+                preferred_receive_gap,
+                NULLIF(created_at, '0000-00-00 00:00:00') AS created_at
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        const string sqlLegacy = """
+            SELECT
+                user_id,
+                campus_id,
+                display_name,
+                phone,
+                lives_on_campus,
+                NULLIF(move_in_date, '0000-00-00') AS move_in_date,
+                NULLIF(move_out_date, '0000-00-00') AS move_out_date,
+                dorm_building,
+                suite_letter,
+                avatar_url,
+                NULLIF(created_at, '0000-00-00 00:00:00') AS created_at
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        static string? NormalizeSuite(object? raw)
+        {
+            if (raw is not string s) return null;
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            return s.Trim().ToUpperInvariant()[0].ToString();
+        }
+
+        async Task<SellerUserDto?> ReadAsync(string sql, bool includesGap)
+        {
+            await using var cmd = new MySqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue("@UserId", userId);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            string? suite = null;
+            if (!reader.IsDBNull(8))
+            {
+                suite = NormalizeSuite(reader.GetString(8));
+            }
+
+            return new SellerUserDto
+            {
+                UserId = reader.GetInt32(0),
+                CampusId = reader.GetInt32(1),
+                DisplayName = reader.GetString(2),
+                Phone = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                LivesOnCampus = reader.GetBoolean(4),
+                MoveInDate = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                MoveOutDate = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                DormBuilding = reader.IsDBNull(7) ? null : reader.GetString(7),
+                SuiteLetter = suite,
+                AvatarUrl = reader.IsDBNull(9) ? null : reader.GetString(9),
+                DefaultGapSolution = includesGap && !reader.IsDBNull(10) ? reader.GetString(10) : null,
+                PreferredReceiveGap = includesGap && !reader.IsDBNull(11) ? reader.GetString(11) : null,
+                CreatedAt = reader.IsDBNull(includesGap ? 12 : 10) ? null : reader.GetDateTime(includesGap ? 12 : 10),
+            };
+        }
+
+        SellerUserDto? dto;
+        try
+        {
+            dto = await ReadAsync(sqlFull, includesGap: true);
+        }
+        catch (MySqlException mx) when (mx.Number == 1054)
+        {
+            dto = await ReadAsync(sqlLegacy, includesGap: false);
+        }
+
+        if (dto is null)
+        {
+            return null;
+        }
+
+        dto.OnProbation = await ReadOnProbationFlagAsync(connection, userId, cancellationToken);
+        return dto;
+    }
+
+    private static async Task<bool> ReadOnProbationFlagAsync(
+        MySqlConnection connection,
+        int userId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT COALESCE(on_probation, 0)
+            FROM users
+            WHERE user_id = @UserId
+            LIMIT 1;
+            """;
+
+        try
+        {
+            await using var cmd = new MySqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue("@UserId", userId);
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
+            if (scalar is null || scalar is DBNull)
+            {
+                return false;
+            }
+
+            return Convert.ToInt32(scalar) != 0;
+        }
+        catch (MySqlException mx) when (mx.Number == 1054)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Sets <c>users.on_probation</c>. Returns false if no row updated or column missing.</summary>
+    public async Task<bool> SetUserProbationAsync(int userId, bool onProbation, CancellationToken cancellationToken = default)
+    {
+        const string sql = """
+            UPDATE users
+            SET on_probation = @OnProbation
+            WHERE user_id = @UserId;
+            """;
+
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        try
+        {
+            await using var cmd = new MySqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue("@OnProbation", onProbation ? 1 : 0);
+            cmd.Parameters.AddWithValue("@UserId", userId);
+            var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
+            return n > 0;
+        }
+        catch (MySqlException mx) when (mx.Number == 1054)
+        {
+            return false;
+        }
+    }
+
+    public async Task<bool> IsUserOnProbationAsync(int userId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        return await ReadOnProbationFlagAsync(connection, userId, cancellationToken);
+    }
+
     private enum ProfileGapReadMode
     {
         Full,

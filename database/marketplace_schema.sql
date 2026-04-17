@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS users (
     preferred_receive_gap  VARCHAR(32) DEFAULT NULL COMMENT 'buyer preference — storage | pickup_window | ship_or_deliver',
     avg_rating      DECIMAL(3,2)   NOT NULL DEFAULT 0.00,
     rating_count    INT            NOT NULL DEFAULT 0,
+    on_probation    TINYINT(1)     NOT NULL DEFAULT 0 COMMENT 'admin probation — block listing create/update',
     created_at      DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id),
     CONSTRAINT fk_user_campus FOREIGN KEY (campus_id)
