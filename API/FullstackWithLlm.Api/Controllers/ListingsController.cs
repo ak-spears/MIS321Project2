@@ -2,6 +2,7 @@ using System.Linq;
 using System.Security.Claims;
 using FullstackWithLlm.Api.Data;
 using FullstackWithLlm.Api.Models;
+using FullstackWithLlm.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -12,10 +13,12 @@ namespace FullstackWithLlm.Api.Controllers;
 public sealed class ListingsController : ControllerBase
 {
     private readonly ListingRepository _listings;
+    private readonly ListingMatchService _listingMatchService;
 
-    public ListingsController(ListingRepository listings)
+    public ListingsController(ListingRepository listings, ListingMatchService listingMatchService)
     {
         _listings = listings;
+        _listingMatchService = listingMatchService;
     }
 
     /// <summary>
@@ -50,6 +53,25 @@ public sealed class ListingsController : ControllerBase
         }
 
         var rows = await _listings.GetFeedAsync(limit, campusId, excludeSellerId, cancellationToken);
+        if (excludeSellerId is { } currentUserId && currentUserId > 0)
+        {
+            var scoreMap = await _listingMatchService.EnsureScoresForFeedAsync(currentUserId, rows, cancellationToken);
+            foreach (var row in rows)
+            {
+                if (scoreMap.TryGetValue(row.ListingId, out var score))
+                {
+                    row.MatchScore = score.Score;
+                    row.MatchReason = score.Reason;
+                }
+            }
+
+            rows = rows
+                .OrderByDescending(r => r.MatchScore.HasValue)
+                .ThenByDescending(r => r.MatchScore ?? int.MinValue)
+                .ThenByDescending(r => r.CreatedAt)
+                .ToList();
+        }
+
         // Defensive: strip own seller_id again in case JWT + SQL ever drift.
         if (excludeSellerId is { } eid && eid > 0)
         {
@@ -250,5 +272,38 @@ public sealed class ListingsController : ControllerBase
         }
 
         return Ok(row);
+    }
+
+    [AllowAnonymous]
+    [HttpGet("{id:int}/match-reason")]
+    [ProducesResponseType(typeof(ListingMatchReasonDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ListingMatchReasonDto>> GetMatchReason(
+        int id,
+        CancellationToken cancellationToken = default)
+    {
+        var row = await _listings.GetByIdAsync(id, cancellationToken);
+        if (row is null)
+        {
+            return NotFound();
+        }
+
+        var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        ListingMatchReasonDto? reason = null;
+        if (int.TryParse(idRaw, out var userId) && userId > 0)
+        {
+            reason = await _listingMatchService.GetOrGenerateReasonAsync(userId, row, cancellationToken);
+        }
+        else
+        {
+            reason = await _listingMatchService.GenerateGuestReasonAsync(row, cancellationToken);
+        }
+
+        if (reason is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(reason);
     }
 }

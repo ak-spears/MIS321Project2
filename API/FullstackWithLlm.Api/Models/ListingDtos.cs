@@ -21,6 +21,8 @@ public sealed class ListingFeedItemDto
     public string Status { get; init; } = "";
     public string SellerDisplayName { get; init; } = "";
     public DateTime CreatedAt { get; init; }
+    public int? MatchScore { get; set; }
+    public string? MatchReason { get; set; }
 }
 
 public sealed class CreateListingRequest
@@ -69,4 +71,11 @@ public sealed class ListingDetailDto
     public string Status { get; init; } = "";
     public string SellerDisplayName { get; init; } = "";
     public DateTime CreatedAt { get; init; }
+}
+
+public sealed class ListingMatchReasonDto
+{
+    public int ListingId { get; init; }
+    public int Score { get; init; }
+    public string Reason { get; init; } = "";
 }

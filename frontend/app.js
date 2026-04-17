@@ -205,6 +205,10 @@ const state = {
     preferredGapSolution: /** @type {null | string} */ (null),
     /** Normalized 0–1 crop for the current AI draft listing image (from model). */
     currentAiCropBox: /** @type {null | { left: number, top: number, width: number, height: number }} */ (null),
+    /** Listing detail: expanded AI match reason by listing id (db key). */
+    listingMatchReasonById: /** @type {Record<string, { score: number, reason: string }>} */ ({}),
+    /** After feed fetch: listing id string → % shown on card (matches “Why this match?” line). */
+    feedMatchScoreByListingId: /** @type {Record<string, number>} */ ({}),
 };
 
 /**
@@ -221,6 +225,7 @@ const state = {
  *   categorySlug: string | null,
  *   listingKind: 'sell' | 'donate',
  *   spaceSuitability: string | null,
+ *   matchScore: number | null,
  * }} HomeFeedItem
  */
 
@@ -799,6 +804,13 @@ function homeFeedCardHtml(item) {
     const condLine = condRaw
         ? `<div class="small mt-1"><span class="text-muted">Condition</span> <span class="text-dark">${escapeHtml(formatListingCondition(condRaw))}</span></div>`
         : "";
+    const scoreRaw = Number(item.matchScore);
+    const score =
+        Number.isFinite(scoreRaw) && item.matchScore != null
+            ? Math.max(0, Math.min(100, Math.round(scoreRaw)))
+            : estimateFallbackMatchScore(item);
+    const scoreTone = score >= 80 ? "success" : score >= 60 ? "warning" : "secondary";
+    const matchBadge = `<span class="badge text-bg-${scoreTone} cdm-match-badge">${escapeHtml(String(score))}% match</span>`;
     return `
         <div class="col-12 col-md-6 col-xl-4">
             <div class="cdm-card cdm-listing-card">
@@ -808,7 +820,7 @@ function homeFeedCardHtml(item) {
                     <div class="cdm-muted small">${blurb}</div>
                     ${condLine}
                     <div class="mt-2 d-flex align-items-center justify-content-between">
-                        <div class="fw-semibold">${price}</div>
+                        <div class="d-flex align-items-center gap-2"><div class="fw-semibold">${price}</div>${matchBadge}</div>
                         <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>
                     </div>
                 </div>
@@ -841,6 +853,23 @@ function toggleSavedListingKey(key) {
     }
     // Refresh home grid so stars update in-place.
     if (state.view === "home") refreshHomeFeedGrid();
+}
+
+function estimateFallbackMatchScore(item) {
+    let score = 58;
+    const kind = String(item?.listingKind || "").toLowerCase();
+    if (kind === "donate") score += 8;
+
+    const c = String(item?.condition || "").toLowerCase();
+    if (c === "new" || c === "like_new") score += 12;
+    else if (c === "good") score += 6;
+    else if (c === "fair") score += 2;
+
+    if (item?.spaceSuitability) score += 6;
+    if (item?.gapSolution) score += 6;
+    if (item?.categorySlug) score += 4;
+
+    return Math.max(0, Math.min(100, score));
 }
 
 function applyFeedFilters(items) {
@@ -890,6 +919,7 @@ function applyFeedFilters(items) {
 
 async function fetchFeedItemsForHome() {
     state.feedThumbSrcByKey = {};
+    state.feedMatchScoreByListingId = {};
     let dbCards = [];
     const myId = parseJwtSub(state.token);
     try {
@@ -929,7 +959,8 @@ async function fetchFeedItemsForHome() {
                     const spaceRaw = row.spaceSuitability ?? row.SpaceSuitability ?? null;
                     const spaceSuitability =
                         spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
-                    return {
+                    const matchRaw = row.matchScore ?? row.MatchScore ?? null;
+                    const item = {
                         key,
                         title: row.title,
                         blurb,
@@ -942,7 +973,18 @@ async function fetchFeedItemsForHome() {
                         categorySlug,
                         listingKind: priceNum === 0 ? "donate" : "sell",
                         spaceSuitability,
+                        matchScore:
+                            matchRaw != null && matchRaw !== ""
+                                ? Number(matchRaw)
+                                : null,
                     };
+                    const lid = String(row.listingId ?? row.ListingId);
+                    const cardPct =
+                        item.matchScore != null && Number.isFinite(Number(item.matchScore))
+                            ? Math.max(0, Math.min(100, Math.round(Number(item.matchScore))))
+                            : estimateFallbackMatchScore(item);
+                    state.feedMatchScoreByListingId[lid] = cardPct;
+                    return item;
                 });
         }
     } catch {
@@ -968,6 +1010,7 @@ async function fetchFeedItemsForHome() {
                 x.spaceSuitability != null && String(x.spaceSuitability).trim() !== ""
                     ? String(x.spaceSuitability).trim()
                     : null,
+            matchScore: 0,
         };
     });
     const fillSampleThumbs = () => {
@@ -5821,6 +5864,17 @@ function renderListingDbFromApi(L) {
     const subtitleHtml = `${escapeHtml(L.category || "Listing")} · <span class="text-body">${escapeHtml(L.sellerDisplayName || "Seller")}</span>${condSubtitle}`;
     const posted =
         L.createdAt != null ? escapeHtml(new Date(L.createdAt).toLocaleString()) : "—";
+    const fromFeed = state.feedMatchScoreByListingId?.[String(L.listingId)];
+    const matchScore =
+        fromFeed != null && Number.isFinite(fromFeed)
+            ? Math.max(0, Math.min(100, Math.round(fromFeed)))
+            : estimateFallbackMatchScore({
+                  listingKind: Number(L.price) === 0 ? "donate" : "sell",
+                  condition: conditionRaw,
+                  spaceSuitability: spaceK,
+                  gapSolution: L.gapSolution ?? L.GapSolution ?? null,
+                  categorySlug: normalizeListingCategorySlug(L.category),
+              });
 
     const fb = encodeURIComponent(L.title || "Listing");
     const urlRaw = L.imageUrl ?? L.ImageUrl;
@@ -5894,9 +5948,16 @@ function renderListingDbFromApi(L) {
 
     const fulfillmentHtml = fulfillmentBlockHtml(L);
 
+    const reasonUiHtml = `<button type="button" class="btn btn-outline-dark btn-sm" data-action="toggle-match-reason" data-listing-id="${escapeHtml(String(L.listingId))}">
+          Why this match?
+        </button>
+        <div class="small mt-2 text-body d-none" id="listing-match-reason-${escapeHtml(String(L.listingId))}"></div>`;
     const aboutSectionHtml = `
       <h2 class="h5 fw-semibold mb-3">About this item</h2>
       <div class="listing-description text-body">${escapeHtml(L.description || "No description provided.")}</div>
+      <div class="mt-4">
+        ${reasonUiHtml}
+      </div>
       <h3 class="h6 text-uppercase cdm-muted small mb-2 mt-4 cdm-listing-specifics-head">Delivery &amp; pickup</h3>
       <p class="small text-body mb-0">${escapeHtml(fulfillmentSummaryText(L))}</p>
     `;
@@ -6005,6 +6066,50 @@ function renderListingDbFromApi(L) {
     wireTradeActions(shell);
     ensureAuthUi();
     wireListingImageFallbacks(shell);
+    wireListingMatchReason(shell, Number(L.listingId), matchScore);
+}
+
+function wireListingMatchReason(root, listingId, defaultScore) {
+    if (!root?.querySelector) return;
+    const btn = root.querySelector("[data-action='toggle-match-reason']");
+    const reasonEl = document.getElementById(`listing-match-reason-${String(listingId)}`);
+    if (!btn || !reasonEl) return;
+
+    btn.addEventListener("click", async () => {
+        const isHidden = reasonEl.classList.contains("d-none");
+        if (!isHidden) {
+            reasonEl.classList.add("d-none");
+            return;
+        }
+
+        const cacheKey = String(listingId);
+        let cached = state.listingMatchReasonById[cacheKey];
+        if (!cached) {
+            reasonEl.classList.remove("d-none");
+            reasonEl.textContent = "Loading match reason…";
+            const { res, data } = await apiJson(`/api/listings/${encodeURIComponent(String(listingId))}/match-reason`);
+            if (!res.ok) {
+                reasonEl.textContent = "Could not load the AI match reason right now.";
+                return;
+            }
+
+            const score = Number(data?.score);
+            const apiScore = Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : defaultScore;
+            const feedPct = state.feedMatchScoreByListingId?.[String(listingId)];
+            cached = {
+                score: feedPct != null && Number.isFinite(feedPct) ? Math.round(feedPct) : apiScore,
+                reason: String(data?.reason || "General dorm fit based on your profile and this listing."),
+            };
+            state.listingMatchReasonById[cacheKey] = cached;
+        }
+
+        const linePct =
+            state.feedMatchScoreByListingId?.[String(listingId)] != null
+                ? Math.round(state.feedMatchScoreByListingId[String(listingId)])
+                : cached.score;
+        reasonEl.textContent = `${linePct}% match — ${cached.reason}`;
+        reasonEl.classList.remove("d-none");
+    });
 }
 
 async function renderListing() {

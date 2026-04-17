@@ -31,6 +31,7 @@ builder.Services.AddScoped<AdminRepository>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton<AiListingFromImageService>();
 builder.Services.AddHttpClient<AiListingDescriptionService>();
+builder.Services.AddHttpClient<ListingMatchService>();
 
 var jwtKey = builder.Configuration["Jwt:SigningKey"];
 if (string.IsNullOrWhiteSpace(jwtKey) || jwtKey.Length < 32)
