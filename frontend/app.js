@@ -60,6 +60,11 @@ function formatAuthNetworkError() {
 const TOKEN_KEY = "cdm_jwt";
 /** Listing ids (strings) the user marked as handed off for free / donation listings (browser only). */
 const DONATION_HANDOFF_KEY = "cdm_donation_handoff_v1";
+/** Tide Loyalty–style points earned per completed donation (handed off), same scope as handoff ids. */
+const TIDE_LOYALTY_POINTS_PER_COMPLETED_DONATION = 20;
+/** Must match `ListingsController` / `CreateListingRequest` server validation. */
+const LISTING_TITLE_MAX_LEN = 150;
+const LISTING_DIMENSIONS_MAX_LEN = 120;
 /** Listing keys (strings) the user starred/saved (browser only). */
 const SAVED_LISTINGS_KEY = "cdm_saved_listings_v1";
 const ADMIN_SESSION_KEY = "cdm_admin_session_v1";
@@ -117,6 +122,11 @@ function markDonationHandoffCompleted(listingId) {
     localStorage.setItem(DONATION_HANDOFF_KEY, JSON.stringify([...s]));
 }
 
+/** Total Tide Loyalty Points from this browser’s completed donation handoffs (not the official UA ledger). */
+function getTideLoyaltyPointsFromDonations() {
+    return getDonationHandoffCompletedIds().size * TIDE_LOYALTY_POINTS_PER_COMPLETED_DONATION;
+}
+
 function getSavedListingKeys() {
     try {
         const raw = localStorage.getItem(SAVED_LISTINGS_KEY);
@@ -143,6 +153,13 @@ function setStoredToken(token) {
     }
 }
 
+function clearClientAuthSession() {
+    setStoredToken(null);
+    state.token = null;
+    state.authAvatarUrl = null;
+    state.preferredGapSolution = null;
+}
+
 const LISTINGS_STORAGE_KEY = "cdm_my_listings_v1";
 /** Local-only checkout / claim history until API persists transactions. */
 const TRANSACTIONS_STORAGE_KEY = "cdm_transactions_v1";
@@ -158,7 +175,7 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations' | 'messages'} */
+    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'previous-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations' | 'messages'} */
     view: "home",
     /** `GET /api/listings/{id}` when viewing own donation detail (read-only + QR). */
     donationDetailListingId: /** @type {number | null} */ (null),
@@ -167,7 +184,7 @@ const state = {
     listingKey: null,
     sellerProfileUserId: /** @type {number | null} */ (null),
     /**
-     * @type {null | { type: 'navigate', view: 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'profile' | 'messages' } | { type: 'donation-detail', listingId: number } | { type: 'buy', listingKey: string }}
+     * @type {null | { type: 'navigate', view: 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'previous-donations' | 'profile' | 'messages' } | { type: 'donation-detail', listingId: number } | { type: 'buy', listingKey: string }}
      */
     afterLoginIntent: null,
     /** Messages view: selected conversation id. */
@@ -1345,17 +1362,26 @@ async function hydrateHomeTransactionsPanel(root) {
         panel.innerHTML = "";
         return;
     }
+    if (isJwtLikelyExpired(state.token)) {
+        clearClientAuthSession();
+        panel.innerHTML = "";
+        if (document.getElementById("auth-nav-slot")) renderAuthNav();
+        return;
+    }
 
     panel.innerHTML = `<div class="cdm-card p-3"><div class="cdm-muted small">Loading purchases…</div></div>`;
     const { res, data } = await apiJson("/api/transactions/mine?limit=5");
     if (!res.ok) {
         if (res.status === 401) {
-            setStoredToken(null);
-            state.token = null;
+            clearClientAuthSession();
             render();
             return;
         }
-        panel.innerHTML = `<div class="cdm-card p-3"><div class="cdm-muted small">Couldn’t load purchases right now.</div></div>`;
+        const hint =
+            res.status === 404
+                ? "GET /api/transactions/mine isn’t on this server (run the MIS321 FullstackWithLlm.Api, not the empty backend/ skeleton, or pull latest and restart)."
+                : "Couldn’t load purchases right now.";
+        panel.innerHTML = `<div class="cdm-card p-3"><div class="cdm-muted small">${hint}</div></div>`;
         return;
     }
 
@@ -1424,6 +1450,7 @@ function navigate(view) {
             view === "donate-post" ||
             view === "my-listings" ||
             view === "my-donations" ||
+            view === "previous-donations" ||
             view === "profile" ||
             view === "messages") &&
         !isAuthed()
@@ -1499,6 +1526,14 @@ function isJwtLikelyExpired(token) {
         return json.exp * 1000 < Date.now() + 15_000;
     } catch {
         return true;
+    }
+}
+
+/** Clears stored JWT when it cannot be decoded or `exp` is past — avoids 401 spam on `/api/users/me` every load. */
+function clearClientAuthIfJwtDead() {
+    if (!state.token) return;
+    if (isJwtLikelyExpired(state.token)) {
+        clearClientAuthSession();
     }
 }
 
@@ -1853,11 +1888,20 @@ async function refreshAuthProfileCache() {
         state.authAvatarUrl = null;
         return;
     }
+    if (isJwtLikelyExpired(state.token)) {
+        clearClientAuthSession();
+        return;
+    }
     try {
         const { res, data } = await apiJson("/api/users/me");
         if (res.ok) {
             state.authAvatarUrl = data.avatarUrl ?? null;
             state.preferredGapSolution = data.defaultGapSolution ?? data.DefaultGapSolution ?? null;
+            return;
+        }
+        // 401: bad/expired/revoked token. 404: user row missing (JWT still valid) — treat as logged out client-side.
+        if (res.status === 401 || res.status === 404) {
+            clearClientAuthSession();
         }
     } catch {
         /* ignore */
@@ -1998,6 +2042,12 @@ function wireNav(root) {
         btn.addEventListener("click", (e) => {
             e.preventDefault();
             navigate("my-donations");
+        });
+    });
+    root.querySelectorAll("[data-action='previous-donations']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigate("previous-donations");
         });
     });
     root.querySelectorAll("[data-action='my-listings']").forEach((btn) => {
@@ -2274,10 +2324,10 @@ function wirePostForm(root) {
                 if (fb) state.currentAiCropBox = fb;
             }
         }
-        if (s.title) setValue("title", s.title);
+        if (s.title) setValue("title", String(s.title).trim().slice(0, LISTING_TITLE_MAX_LEN));
         if (s.category) setValue("category", s.category);
         if (s.condition) setValue("condition", s.condition);
-        if (s.dimensions) setValue("dimensions", s.dimensions);
+        if (s.dimensions) setValue("dimensions", String(s.dimensions).trim().slice(0, LISTING_DIMENSIONS_MAX_LEN));
         if (s.description) setValue("description", s.description);
         if (s.gapSolution) setRadio("gapSolution", s.gapSolution);
         {
@@ -2393,11 +2443,16 @@ function wirePostForm(root) {
     if (isEditing && prefill) {
         setRadio("listingMode", "manual");
         setCheckbox("aiPileMode", false);
-        setValue("title", prefill.title);
+        setValue("title", String(prefill.title ?? "").trim().slice(0, LISTING_TITLE_MAX_LEN));
         setValue("category", prefill.category);
         const condRaw = prefill.condition ?? prefill.Condition ?? "good";
         setValue("condition", String(condRaw).trim() || "good");
-        setValue("dimensions", prefill.dimensions ?? prefill.Dimensions ?? "");
+        setValue(
+            "dimensions",
+            String(prefill.dimensions ?? prefill.Dimensions ?? "")
+                .trim()
+                .slice(0, LISTING_DIMENSIONS_MAX_LEN),
+        );
         setValue("description", prefill.description);
         const p = Number(prefill.price);
         setValue("price", Number.isFinite(p) ? String(prefill.price) : "");
@@ -2597,13 +2652,23 @@ function wirePostForm(root) {
                 /* keep original */
             }
         }
+        let postTitle = String(draft.title || "").trim();
+        if (postTitle.length > LISTING_TITLE_MAX_LEN) {
+            alert(`Title must be at most ${LISTING_TITLE_MAX_LEN} characters (API limit).`);
+            return;
+        }
+        let postDims = draft.dimensions ? String(draft.dimensions).trim() : "";
+        if (postDims.length > LISTING_DIMENSIONS_MAX_LEN) {
+            postDims = postDims.slice(0, LISTING_DIMENSIONS_MAX_LEN);
+        }
+
         const payload = {
-            title: String(draft.title || "").trim(),
+            title: postTitle,
             description: String(draft.description || "").trim() || null,
             price: Number(draft.price),
             category: draft.category ? String(draft.category).trim() : null,
             condition: draft.condition ? String(draft.condition).trim() : null,
-            dimensions: draft.dimensions ? String(draft.dimensions).trim() : null,
+            dimensions: postDims || null,
             gapSolution: draft.gapSolution ? String(draft.gapSolution).trim() : null,
             spaceSuitability: draft.spaceSuitability === "small_dorm" ? "small_dorm" : "any_space",
             storageNotes: draft.storageNotes ? String(draft.storageNotes).trim() : null,
@@ -2629,10 +2694,17 @@ function wirePostForm(root) {
             body: JSON.stringify(payload),
         });
         if (!res.ok) {
-            const msg =
-                typeof data === "string"
-                    ? data
-                    : data?.detail || data?.title || `Could not ${editingNow ? "update" : "post"} listing (HTTP ${res.status}).`;
+            if (res.status === 401) {
+                setStoredToken(null);
+                state.token = null;
+                alert("Session expired — sign in again, then publish.");
+                navigateAuth("login");
+                return;
+            }
+            const msg = parseApiError(
+                data,
+                `Could not ${editingNow ? "update" : "post"} listing (HTTP ${res.status}).`,
+            );
             alert(msg);
             return;
         }
@@ -2907,7 +2979,7 @@ async function renderDonatePost() {
 
                                 <div class="col-12">
                                     <label class="form-label fw-semibold" for="donation-title">Title</label>
-                                    <input class="form-control" id="donation-title" name="title" type="text" required placeholder="e.g., Desk lamp" maxlength="200" />
+                                    <input class="form-control" id="donation-title" name="title" type="text" required placeholder="e.g., Desk lamp" maxlength="${LISTING_TITLE_MAX_LEN}" />
                                 </div>
 
                                 <div class="col-12 col-md-6">
@@ -2931,7 +3003,7 @@ async function renderDonatePost() {
 
                                 <div class="col-12">
                                     <label class="form-label fw-semibold" for="donation-dimensions">Dimensions (optional)</label>
-                                    <input class="form-control" id="donation-dimensions" name="dimensions" type="text" placeholder='e.g., 18" W × 20" D × 34" H' />
+                                    <input class="form-control" id="donation-dimensions" name="dimensions" type="text" maxlength="${LISTING_DIMENSIONS_MAX_LEN}" placeholder='e.g., 18" W × 20" D × 34" H' />
                                 </div>
 
                                 <div class="col-12">
@@ -3054,9 +3126,9 @@ function wireDonationForm(root) {
                 if (fb) state.currentAiCropBox = fb;
             }
         }
-        if (s.title) setValue("title", s.title);
+        if (s.title) setValue("title", String(s.title).trim().slice(0, LISTING_TITLE_MAX_LEN));
         if (s.category) setValue("category", s.category);
-        if (s.dimensions) setValue("dimensions", s.dimensions);
+        if (s.dimensions) setValue("dimensions", String(s.dimensions).trim().slice(0, LISTING_DIMENSIONS_MAX_LEN));
         if (s.condition != null && String(s.condition).trim() !== "") {
             const ck = parseConditionToDonationKey(s.condition);
             if (isDonationEligibleConditionKey(ck)) {
@@ -3131,12 +3203,17 @@ function wireDonationForm(root) {
     }
 
     if (isEditing && prefill) {
-        setValue("title", prefill.title);
+        setValue("title", String(prefill.title ?? "").trim().slice(0, LISTING_TITLE_MAX_LEN));
         setValue("category", prefill.category);
         let ck = parseConditionToDonationKey(prefill.condition ?? prefill.Condition ?? "good");
         if (!isDonationEligibleConditionKey(ck)) ck = "fair";
         setValue("condition", ck);
-        setValue("dimensions", prefill.dimensions ?? prefill.Dimensions ?? "");
+        setValue(
+            "dimensions",
+            String(prefill.dimensions ?? prefill.Dimensions ?? "")
+                .trim()
+                .slice(0, LISTING_DIMENSIONS_MAX_LEN),
+        );
         setValue("description", prefill.description ?? prefill.Description ?? "");
     }
 
@@ -3304,9 +3381,13 @@ function wireDonationForm(root) {
             }
         }
 
-        const title = String(fd.get("title") || "").trim();
+        let title = String(fd.get("title") || "").trim();
         if (!title) {
             alert("Title is required.");
+            return;
+        }
+        if (title.length > LISTING_TITLE_MAX_LEN) {
+            alert(`Title must be at most ${LISTING_TITLE_MAX_LEN} characters (API limit).`);
             return;
         }
 
@@ -3321,6 +3402,11 @@ function wireDonationForm(root) {
             isEditing && prefill ? String(prefill.description ?? prefill.Description ?? "").trim() : "";
         const description = descTyped || descExisting || DONATION_DEFAULT_DESCRIPTION;
 
+        let dimRaw = fd.get("dimensions") ? String(fd.get("dimensions")).trim() : "";
+        if (dimRaw.length > LISTING_DIMENSIONS_MAX_LEN) {
+            dimRaw = dimRaw.slice(0, LISTING_DIMENSIONS_MAX_LEN);
+        }
+
         /** @type {Record<string, unknown>} */
         const payload = {
             title,
@@ -3328,7 +3414,7 @@ function wireDonationForm(root) {
             price: 0,
             category: fd.get("category") ? String(fd.get("category")).trim() : null,
             condition: condKey,
-            dimensions: fd.get("dimensions") ? String(fd.get("dimensions")).trim() : null,
+            dimensions: dimRaw || null,
             gapSolution: "storage",
             spaceSuitability: "any_space",
             storageNotes: null,
@@ -3346,10 +3432,17 @@ function wireDonationForm(root) {
             body: JSON.stringify(payload),
         });
         if (!res.ok) {
-            const msg =
-                typeof data === "string"
-                    ? data
-                    : data?.detail || data?.title || `Could not ${editingNow ? "update" : "post"} donation (HTTP ${res.status}).`;
+            if (res.status === 401) {
+                setStoredToken(null);
+                state.token = null;
+                alert("Session expired — sign in again, then publish your donation.");
+                navigateAuth("login");
+                return;
+            }
+            const msg = parseApiError(
+                data,
+                `Could not ${editingNow ? "update" : "post"} donation (HTTP ${res.status}).`,
+            );
             alert(msg);
             return;
         }
@@ -5978,7 +6071,7 @@ async function renderPost() {
 
                                 <div class="col-12">
                                     <label class="form-label fw-semibold" for="post-title">Title</label>
-                                    <input class="form-control" id="post-title" name="title" type="text" required placeholder="e.g., Twin XL comforter set" maxlength="200" />
+                                    <input class="form-control" id="post-title" name="title" type="text" required placeholder="e.g., Twin XL comforter set" maxlength="${LISTING_TITLE_MAX_LEN}" />
                                 </div>
 
                                 <div class="col-12 col-md-6">
@@ -6011,7 +6104,7 @@ async function renderPost() {
 
                                 <div class="col-12">
                                     <label class="form-label fw-semibold" for="post-dimensions">Dimensions (optional)</label>
-                                    <input class="form-control" id="post-dimensions" name="dimensions" type="text" placeholder='e.g., 18" W × 20" D × 34" H' />
+                                    <input class="form-control" id="post-dimensions" name="dimensions" type="text" maxlength="${LISTING_DIMENSIONS_MAX_LEN}" placeholder='e.g., 18" W × 20" D × 34" H' />
                                 </div>
 
                                 <div class="col-12">
@@ -7318,10 +7411,124 @@ async function renderMyDonations() {
                             <h1 class="h3 cdm-title mb-1">My donations</h1>
                             <p class="cdm-muted small mb-0">${escapeHtml(sub)}</p>
                         </div>
-                        <button type="button" class="btn cdm-btn-crimson" data-action="donate-post">Donate</button>
+                        <div class="d-flex flex-wrap gap-2 justify-content-end">
+                            <button type="button" class="btn btn-outline-dark" data-action="previous-donations">Previous donations</button>
+                            <button type="button" class="btn cdm-btn-crimson" data-action="donate-post">Donate</button>
+                        </div>
                     </div>
                     <p class="small cdm-muted mb-4">Your donation items — tap <strong>View</strong> or the title to pull up details and the <strong>drop-off QR code</strong>. Mark <strong>handed off</strong> once you have dropped the item off (stored on this browser only).</p>
                     <div id="my-donations-body">${pendingHtml}${completedHtml}</div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+    wireMyDonationsPage(shell);
+    hydrateMineListingThumbs(shell);
+    wireListingImageFallbacks(shell);
+}
+
+async function renderPreviousDonations() {
+    const root = document.getElementById("app");
+    root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading…</div></div>`;
+
+    let apiRows = [];
+    if (state.token) {
+        const { res, data } = await apiJson("/api/listings/mine?limit=48");
+        if (res.ok && Array.isArray(data)) {
+            const myId = parseJwtSub(state.token);
+            apiRows = data.filter((row) => {
+                const sid = row.sellerId ?? row.SellerId;
+                const okSeller = myId != null && sid != null && Number(sid) === myId;
+                const p = Number(row.price);
+                return okSeller && Number.isFinite(p) && p === 0;
+            });
+        }
+    }
+
+    const doneIds = getDonationHandoffCompletedIds();
+    const completed = apiRows.filter((row) => doneIds.has(String(row.listingId ?? row.ListingId)));
+    const tideLoyaltyPoints = getTideLoyaltyPointsFromDonations();
+    const completedHandoffCount = doneIds.size;
+
+    state.mineThumbSrcById = {};
+    completed.forEach((row) => {
+        const id = row.listingId ?? row.ListingId;
+        const u = row.imageUrl ?? row.ImageUrl;
+        if (id != null && u && String(u).trim()) {
+            state.mineThumbSrcById[String(id)] = String(u).trim();
+        }
+    });
+
+    const listHtml = completed.length
+        ? completed.map((r) => donationListingCardHtml(r, true)).join("")
+        : completedHandoffCount > 0
+          ? `<p class="cdm-muted small mb-0">Points still apply. Listings are no longer on your feed.</p>`
+          : `<p class="cdm-muted small mb-0">Mark a donation <strong>handed off</strong> on My donations to earn points and see it here.</p>`;
+
+    root.innerHTML = "";
+
+    const shell = el(`
+        <div class="cdm-shell">
+            <nav class="navbar navbar-expand-lg cdm-topbar cdm-navbar-top" id="navbar_top">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
+                    </a>
+
+                    <button
+                        class="navbar-toggler"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavPrevDonations"
+                        aria-controls="cdmNavPrevDonations"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+
+                    <div class="collapse navbar-collapse" id="cdmNavPrevDonations">
+                        ${topNavPrimaryLinksHtml(null)}
+
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot">
+                            <span class="cdm-pill" id="api-pill">API: ${state.apiHealth.status}</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <div class="body-content cdm-body-content">
+                <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    <button type="button" class="btn btn-link text-decoration-none text-dark px-0 cdm-post-back" data-action="my-donations">
+                        ← My donations
+                    </button>
+                    <h1 class="h3 cdm-title mb-3">Previous donations</h1>
+
+                    <section class="cdm-tide-loyalty-card mb-4" aria-label="Tide Loyalty points balance">
+                        <div class="cdm-tide-loyalty-card-inner">
+                            <div class="cdm-tide-loyalty-card-head">
+                                <span class="cdm-tide-loyalty-eyebrow">Tide Loyalty</span>
+                                <span class="cdm-tide-loyalty-chip">Donations</span>
+                            </div>
+                            <div class="cdm-tide-loyalty-balance-row">
+                                <span class="cdm-tide-loyalty-value" id="cdm-tide-loyalty-value">${tideLoyaltyPoints}</span>
+                                <span class="cdm-tide-loyalty-unit">pts</span>
+                            </div>
+                            <div class="cdm-tide-loyalty-meta">
+                                <span>+${TIDE_LOYALTY_POINTS_PER_COMPLETED_DONATION} each</span>
+                                <span class="cdm-tide-loyalty-meta-dot" aria-hidden="true"></span>
+                                <span>${completedHandoffCount} completed</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <h2 class="h6 text-uppercase cdm-muted small mb-3" style="letter-spacing:0.06em;">Completed donations</h2>
+                    <div id="previous-donations-body">${listHtml}</div>
                 </div>
             </div>
         </div>
@@ -7405,7 +7612,7 @@ function wireCheckoutPage(root) {
             savedTransactionId = parseTransactionIdFromApiPayload(data);
             /** @type {{ res: Response; data: unknown } | null} */
             let minePoll = null;
-            if (savedTransactionId == null) {
+            if (savedTransactionId == null && state.token && !isJwtLikelyExpired(state.token)) {
                 minePoll = await apiJson("/api/transactions/mine?limit=48");
                 if (minePoll.res.ok && Array.isArray(minePoll.data)) {
                     const match = minePoll.data.find((t) => Number(t.listingId ?? t.ListingId) === listingIdNum);
@@ -7809,16 +8016,19 @@ function renderTransactions() {
     void (async () => {
         let serverRows = [];
         let apiOk = false;
-        if (state.token) {
+        if (state.token && !isJwtLikelyExpired(state.token)) {
             const { res, data } = await apiJson("/api/transactions/mine?limit=48");
             apiOk = res.ok;
-            if (res.status === 401) {
-                setStoredToken(null);
-                state.token = null;
+            if (res.status === 401 || res.status === 404) {
+                if (res.status === 401) {
+                    clearClientAuthSession();
+                }
                 apiOk = false;
             } else if (res.ok && Array.isArray(data)) {
                 serverRows = data.map(mapServerTransactionToRow);
             }
+        } else if (state.token && isJwtLikelyExpired(state.token)) {
+            clearClientAuthSession();
         }
         const localDemo = loadLocalTransactions().filter((t) => t.listingId == null);
         const rows = [...serverRows, ...localDemo].sort(
@@ -8239,6 +8449,8 @@ function render() {
         void renderMyListings();
     } else if (state.view === "my-donations") {
         void renderMyDonations();
+    } else if (state.view === "previous-donations") {
+        void renderPreviousDonations();
     } else if (state.view === "donation-detail") {
         void renderDonationDetail();
     } else if (state.view === "listing") {
@@ -8282,6 +8494,7 @@ async function checkHealth() {
     }
 }
 
+clearClientAuthIfJwtDead();
 render();
 checkHealth();
 if (state.token) {

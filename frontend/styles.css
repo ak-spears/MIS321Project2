@@ -712,6 +712,90 @@ button.cdm-chip {
     box-shadow: 0 4px 12px rgba(158, 27, 50, 0.25);
 }
 
+/* Previous donations — Tide Loyalty (rewards wallet) */
+.cdm-tide-loyalty-card {
+    border-radius: var(--cdm-radius-lg);
+    overflow: hidden;
+    box-shadow: 0 14px 36px rgba(15, 23, 42, 0.16), 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+}
+
+.cdm-tide-loyalty-card-inner {
+    background: linear-gradient(125deg, #120709 0%, var(--cdm-crimson-dark) 42%, var(--cdm-crimson) 100%);
+    color: #fff;
+    padding: 1.35rem 1.5rem 1.2rem;
+}
+
+.cdm-tide-loyalty-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.35rem;
+}
+
+.cdm-tide-loyalty-eyebrow {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    opacity: 0.88;
+}
+
+.cdm-tide-loyalty-chip {
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 0.22rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    white-space: nowrap;
+}
+
+.cdm-tide-loyalty-balance-row {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.55rem;
+    margin-top: 0.5rem;
+}
+
+.cdm-tide-loyalty-value {
+    font-size: clamp(2.75rem, 9vw, 3.5rem);
+    font-weight: 800;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
+    text-shadow: 0 2px 18px rgba(0, 0, 0, 0.25);
+}
+
+.cdm-tide-loyalty-unit {
+    font-size: 1.05rem;
+    font-weight: 600;
+    opacity: 0.78;
+    letter-spacing: 0.02em;
+}
+
+.cdm-tide-loyalty-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.5rem;
+    margin-top: 1rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    opacity: 0.72;
+}
+
+.cdm-tide-loyalty-meta-dot {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.55;
+    flex-shrink: 0;
+}
+
 .cdm-linklist .cdm-linkmeta {
     color: var(--cdm-muted);
     font-size: 0.85rem;
