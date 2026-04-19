@@ -30,7 +30,7 @@ public sealed class ListingsController : ControllerBase
     }
 
     /// <summary>
-    /// Home feed: active listings from other users. When authenticated, the current user&apos;s own listings are excluded (they appear under GET mine).
+    /// Home feed: active for-sale listings (price &gt; 0) from other users — not free/donation rows. When authenticated, the current user&apos;s own listings are excluded (they appear under GET mine).
     /// </summary>
     [AllowAnonymous]
     [HttpGet("feed")]

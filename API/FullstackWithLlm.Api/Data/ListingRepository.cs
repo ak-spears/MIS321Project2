@@ -20,8 +20,8 @@ public sealed class ListingRepository
     }
 
     /// <summary>
-    /// Public feed: active listings. When <paramref name="excludeSellerId"/> is set (logged-in user),
-    /// their own listings are omitted so they appear only under My listings.
+    /// Public feed: active <strong>for-sale</strong> listings (price &gt; 0). Free/donation listings use price 0 and belong on the donations flow, not the buyer browse feed.
+    /// When <paramref name="excludeSellerId"/> is set (logged-in user), their own listings are omitted so they appear only under My listings.
     /// </summary>
     public async Task<IReadOnlyList<ListingFeedItemDto>> GetFeedAsync(
         int limit,
@@ -87,6 +87,7 @@ public sealed class ListingRepository
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.status = 'active'
+              AND l.price > 0
               AND (@campus_id IS NULL OR l.campus_id = @campus_id)
               AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
             ORDER BY l.created_at DESC
@@ -131,6 +132,7 @@ public sealed class ListingRepository
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
             WHERE l.status = 'active'
+              AND l.price > 0
               AND (@campus_id IS NULL OR l.campus_id = @campus_id)
               AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
             ORDER BY l.created_at DESC
