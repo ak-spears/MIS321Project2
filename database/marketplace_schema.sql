@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS listings (
     pickup_location VARCHAR(255) DEFAULT NULL,
     delivery_notes TEXT        DEFAULT NULL,
     space_suitability VARCHAR(32) DEFAULT NULL COMMENT 'small_dorm | any_space — dorm space fit',
+    or_best_offer TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '1 = seller accepts offers below list price',
     image_url   MEDIUMTEXT     DEFAULT NULL,
     status      ENUM('active','pending','sold','removed') NOT NULL DEFAULT 'active',
     created_at  DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -17,6 +17,8 @@ public sealed class ListingFeedItemDto
     public string? GapSolution { get; init; }
     /// <summary><c>small_dorm</c> | <c>any_space</c> — null if column missing or unset.</summary>
     public string? SpaceSuitability { get; init; }
+    /// <summary>When true, seller is open to offers below the listed price.</summary>
+    public bool OrBestOffer { get; init; }
     public string? ImageUrl { get; init; }
     public string Status { get; init; } = "";
     public string SellerDisplayName { get; init; } = "";
@@ -46,6 +48,8 @@ public sealed class CreateListingRequest
     public string? DeliveryNotes { get; set; }
     /// <summary>HTTPS URL or data:image… base64.</summary>
     public string? ImageUrl { get; set; }
+    /// <summary>Buyer may offer below list price (ignored when <c>Price</c> is 0).</summary>
+    public bool OrBestOffer { get; set; }
 }
 
 public sealed class ListingDetailDto
@@ -62,6 +66,7 @@ public sealed class ListingDetailDto
     public string? GapSolution { get; init; }
     /// <summary><c>small_dorm</c> | <c>any_space</c>.</summary>
     public string? SpaceSuitability { get; init; }
+    public bool OrBestOffer { get; init; }
     public string? StorageNotes { get; init; }
     public DateTime? PickupStart { get; init; }
     public DateTime? PickupEnd { get; init; }

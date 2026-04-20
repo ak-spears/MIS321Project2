@@ -80,7 +80,8 @@ public sealed class ListingRepository
                 l.price,
                 l.category,
                 {conditionCol}l.gap_solution,
-                {spaceCol}l.image_url,
+                {spaceCol}l.or_best_offer,
+                l.image_url,
                 l.status,
                 l.created_at,
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
@@ -125,6 +126,7 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
+                CAST(0 AS UNSIGNED) AS or_best_offer,
                 CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
@@ -206,7 +208,8 @@ public sealed class ListingRepository
                 l.price,
                 l.category,
                 {conditionCol}l.gap_solution,
-                {spaceCol}l.image_url,
+                {spaceCol}l.or_best_offer,
+                l.image_url,
                 l.status,
                 l.created_at,
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
@@ -247,6 +250,7 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
+                CAST(0 AS UNSIGNED) AS or_best_offer,
                 CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 l.created_at,
@@ -293,6 +297,9 @@ public sealed class ListingRepository
             spaceSuitability = reader.IsDBNull(ordSp) ? null : reader.GetString(ordSp);
         }
 
+        var ordObo = reader.GetOrdinal("or_best_offer");
+        var orBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo));
+
         return new ListingFeedItemDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
@@ -307,6 +314,7 @@ public sealed class ListingRepository
             Condition = condition,
             GapSolution = reader.IsDBNull(ordGap) ? null : reader.GetString(ordGap),
             SpaceSuitability = spaceSuitability,
+            OrBestOffer = orBestOffer,
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
@@ -316,6 +324,8 @@ public sealed class ListingRepository
 
     private static ListingFeedItemDto MapFeedRowMinimal(MySqlDataReader reader)
     {
+        var ordObo = reader.GetOrdinal("or_best_offer");
+        var orBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo));
         return new ListingFeedItemDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
@@ -330,6 +340,7 @@ public sealed class ListingRepository
             Condition = null,
             GapSolution = null,
             SpaceSuitability = null,
+            OrBestOffer = orBestOffer,
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
@@ -422,6 +433,7 @@ public sealed class ListingRepository
                 item_condition, dimensions,
                 gap_solution, storage_notes, pickup_start, pickup_end, pickup_location, delivery_notes,
                 space_suitability,
+                or_best_offer,
                 image_url, status
             )
             VALUES (
@@ -429,6 +441,7 @@ public sealed class ListingRepository
                 @item_condition, @dimensions,
                 @gap_solution, @storage_notes, @pickup_start, @pickup_end, @pickup_location, @delivery_notes,
                 @space_suitability,
+                @or_best_offer,
                 @image_url, 'active'
             );
             """;
@@ -449,6 +462,7 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@pickup_location", string.IsNullOrWhiteSpace(request.PickupLocation) ? DBNull.Value : request.PickupLocation.Trim());
         cmd.Parameters.AddWithValue("@delivery_notes", string.IsNullOrWhiteSpace(request.DeliveryNotes) ? DBNull.Value : request.DeliveryNotes.Trim());
         cmd.Parameters.AddWithValue("@space_suitability", string.IsNullOrWhiteSpace(request.SpaceSuitability) ? DBNull.Value : request.SpaceSuitability.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -494,24 +508,24 @@ public sealed class ListingRepository
                 INSERT INTO listings (
                     campus_id, seller_id, title, description, price, category,
                     item_condition, dimensions,
-                    gap_solution, image_url, status
+                    gap_solution, or_best_offer, image_url, status
                 )
                 VALUES (
                     @campus_id, @seller_id, @title, @description, @price, @category,
                     @item_condition, @dimensions,
-                    @gap_solution, @image_url, 'active'
+                    @gap_solution, @or_best_offer, @image_url, 'active'
                 );
                 """
             : """
                 INSERT INTO listings (
                     campus_id, seller_id, title, description, price, category,
                     item_condition,
-                    gap_solution, image_url, status
+                    gap_solution, or_best_offer, image_url, status
                 )
                 VALUES (
                     @campus_id, @seller_id, @title, @description, @price, @category,
                     @item_condition,
-                    @gap_solution, @image_url, 'active'
+                    @gap_solution, @or_best_offer, @image_url, 'active'
                 );
                 """;
 
@@ -529,6 +543,7 @@ public sealed class ListingRepository
         }
 
         cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -552,11 +567,11 @@ public sealed class ListingRepository
         const string insertSql = """
             INSERT INTO listings (
                 campus_id, seller_id, title, description, price, category,
-                gap_solution, image_url, status
+                gap_solution, or_best_offer, image_url, status
             )
             VALUES (
                 @campus_id, @seller_id, @title, @description, @price, @category,
-                @gap_solution, @image_url, 'active'
+                @gap_solution, @or_best_offer, @image_url, 'active'
             );
             """;
 
@@ -568,6 +583,7 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@price", request.Price);
         cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
         cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -587,11 +603,11 @@ public sealed class ListingRepository
         const string insertSql = """
             INSERT INTO listings (
                 campus_id, seller_id, title, description, price, category,
-                image_url, status
+                or_best_offer, image_url, status
             )
             VALUES (
                 @campus_id, @seller_id, @title, @description, @price, @category,
-                @image_url, 'active'
+                @or_best_offer, @image_url, 'active'
             );
             """;
 
@@ -602,6 +618,7 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
         cmd.Parameters.AddWithValue("@price", request.Price);
         cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -650,6 +667,9 @@ public sealed class ListingRepository
 
         return DateTime.TryParse(raw, out var d) ? d.Date : null;
     }
+
+    private static bool EffectiveOrBestOffer(CreateListingRequest request) =>
+        request.OrBestOffer && request.Price > 0;
 
     /// <summary>Soft-delete: sets <c>status = 'removed'</c> for the seller&apos;s row.</summary>
     public async Task<bool> DeleteMineAsync(int sellerId, int listingId, CancellationToken cancellationToken = default)
@@ -731,6 +751,7 @@ public sealed class ListingRepository
                 pickup_location = @pickup_location,
                 delivery_notes = @delivery_notes,
                 space_suitability = @space_suitability,
+                or_best_offer = @or_best_offer,
                 image_url = @image_url
             WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
             """;
@@ -751,6 +772,7 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@pickup_location", string.IsNullOrWhiteSpace(request.PickupLocation) ? DBNull.Value : request.PickupLocation.Trim());
         cmd.Parameters.AddWithValue("@delivery_notes", string.IsNullOrWhiteSpace(request.DeliveryNotes) ? DBNull.Value : request.DeliveryNotes.Trim());
         cmd.Parameters.AddWithValue("@space_suitability", string.IsNullOrWhiteSpace(request.SpaceSuitability) ? DBNull.Value : request.SpaceSuitability.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -801,6 +823,7 @@ public sealed class ListingRepository
                     item_condition = @item_condition,
                     dimensions = @dimensions,
                     gap_solution = @gap_solution,
+                    or_best_offer = @or_best_offer,
                     image_url = @image_url
                 WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
                 """
@@ -812,6 +835,7 @@ public sealed class ListingRepository
                     category = @category,
                     item_condition = @item_condition,
                     gap_solution = @gap_solution,
+                    or_best_offer = @or_best_offer,
                     image_url = @image_url
                 WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
                 """;
@@ -830,6 +854,7 @@ public sealed class ListingRepository
         }
 
         cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -854,6 +879,7 @@ public sealed class ListingRepository
                 price = @price,
                 category = @category,
                 gap_solution = @gap_solution,
+                or_best_offer = @or_best_offer,
                 image_url = @image_url
             WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
             """;
@@ -866,6 +892,7 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@price", request.Price);
         cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
         cmd.Parameters.AddWithValue("@gap_solution", string.IsNullOrWhiteSpace(request.GapSolution) ? DBNull.Value : request.GapSolution.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -889,6 +916,7 @@ public sealed class ListingRepository
                 description = @description,
                 price = @price,
                 category = @category,
+                or_best_offer = @or_best_offer,
                 image_url = @image_url
             WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
             """;
@@ -900,6 +928,7 @@ public sealed class ListingRepository
         cmd.Parameters.AddWithValue("@description", string.IsNullOrWhiteSpace(request.Description) ? DBNull.Value : request.Description.Trim());
         cmd.Parameters.AddWithValue("@price", request.Price);
         cmd.Parameters.AddWithValue("@category", string.IsNullOrWhiteSpace(request.Category) ? DBNull.Value : request.Category.Trim());
+        cmd.Parameters.AddWithValue("@or_best_offer", EffectiveOrBestOffer(request) ? 1 : 0);
         cmd.Parameters.Add(
             new MySqlParameter("@image_url", MySqlDbType.MediumText)
             {
@@ -978,6 +1007,7 @@ public sealed class ListingRepository
                 l.pickup_location,
                 l.delivery_notes,
                 l.space_suitability,
+                l.or_best_offer,
                 l.image_url,
                 l.status,
                 NULLIF(l.created_at, '0000-00-00 00:00:00') AS created_at,
@@ -1006,6 +1036,7 @@ public sealed class ListingRepository
         var ordPl = reader.GetOrdinal("pickup_location");
         var ordDel = reader.GetOrdinal("delivery_notes");
         var ordSpace = reader.GetOrdinal("space_suitability");
+        var ordObo = reader.GetOrdinal("or_best_offer");
 
         return new ListingDetailDto
         {
@@ -1026,6 +1057,7 @@ public sealed class ListingRepository
             PickupLocation = reader.IsDBNull(ordPl) ? null : reader.GetString(ordPl),
             DeliveryNotes = reader.IsDBNull(ordDel) ? null : reader.GetString(ordDel),
             SpaceSuitability = reader.IsDBNull(ordSpace) ? null : reader.GetString(ordSpace),
+            OrBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo)),
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
@@ -1046,6 +1078,7 @@ public sealed class ListingRepository
                 l.description,
                 l.price,
                 l.category,
+                CAST(0 AS UNSIGNED) AS or_best_offer,
                 CAST(NULL AS CHAR) AS image_url,
                 l.status,
                 NULLIF(l.created_at, '0000-00-00 00:00:00') AS created_at,
@@ -1065,6 +1098,7 @@ public sealed class ListingRepository
             return null;
         }
 
+        var ordObo = reader.GetOrdinal("or_best_offer");
         return new ListingDetailDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
@@ -1084,6 +1118,7 @@ public sealed class ListingRepository
             PickupLocation = null,
             DeliveryNotes = null,
             SpaceSuitability = null,
+            OrBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo)),
             ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),

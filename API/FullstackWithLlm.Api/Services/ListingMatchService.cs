@@ -166,6 +166,7 @@ public sealed class ListingMatchService
             Condition = listing.Condition,
             GapSolution = listing.GapSolution,
             SpaceSuitability = listing.SpaceSuitability,
+            OrBestOffer = listing.OrBestOffer,
             CreatedAt = listing.CreatedAt ?? DateTime.UtcNow,
         };
 

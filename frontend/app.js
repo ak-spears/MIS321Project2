@@ -250,8 +250,15 @@ const state = {
  *   listingKind: 'sell' | 'donate',
  *   spaceSuitability: string | null,
  *   matchScore: number | null,
+ *   orBestOffer?: boolean,
  * }} HomeFeedItem
  */
+
+/** Paid listings only: “Or Best Offer” pill for cards when seller accepts below list. */
+function listingOrBestOfferBadgeHtml(item) {
+    if (!item?.orBestOffer || !Number.isFinite(Number(item.priceNum)) || Number(item.priceNum) <= 0) return "";
+    return `<span class="badge text-bg-info cdm-obo-pill">Or Best Offer</span>`;
+}
 
 (function hydrateEmailFromJwt() {
     const t = state.token;
@@ -831,6 +838,7 @@ function homeFeedCardHtml(item) {
     const score = effectiveHomeFeedMatchPct(item);
     const scoreTone = score >= 80 ? "success" : score >= 60 ? "warning" : "secondary";
     const matchBadge = `<span class="badge text-bg-${scoreTone} cdm-match-badge">${escapeHtml(String(score))}% match</span>`;
+    const oboBadge = listingOrBestOfferBadgeHtml(item);
     return `
         <div class="col-12 col-md-6 col-xl-4">
             <div class="cdm-card cdm-listing-card">
@@ -840,7 +848,7 @@ function homeFeedCardHtml(item) {
                     <div class="cdm-muted small">${blurb}</div>
                     ${condLine}
                     <div class="mt-2 d-flex align-items-center justify-content-between">
-                        <div class="d-flex align-items-center gap-2"><div class="fw-semibold">${price}</div>${matchBadge}</div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap"><div class="fw-semibold">${price}</div>${oboBadge}${matchBadge}</div>
                         <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>
                     </div>
                 </div>
@@ -997,6 +1005,11 @@ async function fetchFeedItemsForHome() {
                     const spaceSuitability =
                         spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
                     const matchRaw = row.matchScore ?? row.MatchScore ?? null;
+                    const oboRaw = row.orBestOffer ?? row.OrBestOffer;
+                    const orBestOffer =
+                        oboRaw === true ||
+                        oboRaw === 1 ||
+                        (typeof oboRaw === "string" && ["1", "true", "yes"].includes(String(oboRaw).toLowerCase()));
                     const item = {
                         key,
                         title: row.title,
@@ -1010,6 +1023,7 @@ async function fetchFeedItemsForHome() {
                         categorySlug,
                         listingKind: priceNum === 0 ? "donate" : "sell",
                         spaceSuitability,
+                        orBestOffer,
                         matchScore:
                             matchRaw != null && matchRaw !== ""
                                 ? Number(matchRaw)
@@ -2344,6 +2358,7 @@ function wirePostForm(root) {
                 const pr = s.price ?? s.Price;
                 if (pr != null && String(pr).trim() !== "") setValue("price", String(pr));
                 else setValue("price", "0");
+                setCheckbox("orBestOffer", false);
             } else {
                 const pr = s.price ?? s.Price;
                 if (pr != null && String(pr).trim() !== "") setValue("price", String(pr));
@@ -2466,6 +2481,11 @@ function wirePostForm(root) {
         setValue("deliveryNotes", prefill.deliveryNotes);
         const ssRaw = prefill.spaceSuitability ?? prefill.SpaceSuitability ?? "any_space";
         setRadio("spaceSuitability", String(ssRaw).trim() === "small_dorm" ? "small_dorm" : "any_space");
+        const oboPref = prefill.orBestOffer ?? prefill.OrBestOffer;
+        setCheckbox(
+            "orBestOffer",
+            oboPref === true || oboPref === 1 || String(oboPref).toLowerCase() === "true",
+        );
         const ltEl = form.querySelector("#post-listing-type");
         if (ltEl instanceof HTMLInputElement) ltEl.value = "sell";
     }
@@ -2677,6 +2697,7 @@ function wirePostForm(root) {
             pickupLocation: draft.pickupLocation ? String(draft.pickupLocation).trim() : null,
             deliveryNotes: draft.deliveryNotes ? String(draft.deliveryNotes).trim() : null,
             imageUrl,
+            orBestOffer: fd.get("orBestOffer") === "on",
         };
         if (!payload.title) {
             alert("Title is required.");
@@ -3423,6 +3444,7 @@ function wireDonationForm(root) {
             pickupLocation: null,
             deliveryNotes: null,
             imageUrl,
+            orBestOffer: false,
         };
 
         const path = editingNow ? `/api/listings/${state.editingListingId}` : "/api/listings";
@@ -5474,6 +5496,11 @@ function homeFeedItemFromDbListingApiRow(row) {
     const condition = row.condition ?? row.Condition ?? null;
     const spaceRaw = row.spaceSuitability ?? row.SpaceSuitability ?? null;
     const spaceSuitability = spaceRaw != null && String(spaceRaw).trim() !== "" ? String(spaceRaw).trim() : null;
+    const oboRaw = row.orBestOffer ?? row.OrBestOffer;
+    const orBestOffer =
+        oboRaw === true ||
+        oboRaw === 1 ||
+        (typeof oboRaw === "string" && ["1", "true", "yes"].includes(String(oboRaw).toLowerCase()));
     return {
         key,
         title: row.title,
@@ -5487,6 +5514,7 @@ function homeFeedItemFromDbListingApiRow(row) {
         categorySlug,
         listingKind: priceNum === 0 ? "donate" : "sell",
         spaceSuitability,
+        orBestOffer,
     };
 }
 
@@ -5636,6 +5664,7 @@ function sellerProfileListingCardHtml(item, status) {
         String(status || "").toLowerCase() === "sold"
             ? `<span class="badge text-bg-secondary position-absolute top-0 start-0 m-2">Sold</span>`
             : "";
+    const oboBadge = listingOrBestOfferBadgeHtml(item);
 
     const title = escapeHtml(item.title);
     const blurb = escapeHtml(item.blurb);
@@ -5664,7 +5693,7 @@ function sellerProfileListingCardHtml(item, status) {
                     <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="${key}">${title}</button>
                     <div class="cdm-muted small">${blurb}</div>
                     <div class="mt-2 d-flex align-items-center justify-content-between">
-                        <div class="fw-semibold">${price}</div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap"><div class="fw-semibold">${price}</div>${oboBadge}</div>
                         <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>
                     </div>
                 </div>
@@ -6138,6 +6167,10 @@ async function renderPost() {
                                         <span class="input-group-text">$</span>
                                         <input class="form-control" id="post-price" name="price" type="number" min="0" step="0.01" placeholder="0.00" />
                                     </div>
+                                    <div class="form-check mt-2">
+                                        <input class="form-check-input" type="checkbox" name="orBestOffer" value="on" id="post-or-best-offer" />
+                                        <label class="form-check-label small" for="post-or-best-offer">Or best offer — buyers may message with a price below your listing</label>
+                                    </div>
                                 </div>
 
                                 <div class="col-12">
@@ -6372,6 +6405,12 @@ function listingCardApiHtml(row) {
     const cat = escapeHtml(categoryLabel[row.category] || row.category || "—");
     const priceNum = Number(row.price);
     const priceLabel = priceNum === 0 ? "Free" : `$${escapeHtml(priceNum.toFixed(2))}`;
+    const oboR = row.orBestOffer ?? row.OrBestOffer;
+    const oboMineOn =
+        oboR === true ||
+        oboR === 1 ||
+        (typeof oboR === "string" && ["1", "true", "yes"].includes(String(oboR).toLowerCase()));
+    const oboPillMine = listingOrBestOfferBadgeHtml({ orBestOffer: oboMineOn, priceNum });
     const condRaw = row.condition ?? row.Condition ?? null;
     const condBit =
         condRaw != null && String(condRaw).trim() !== ""
@@ -6398,7 +6437,7 @@ function listingCardApiHtml(row) {
                     ${thumb}
                     <div>
                         <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="db:${lid}">${title}</button>
-                        <div class="cdm-muted small">${cat} · ${priceLabel}${condBit} · <span class="badge rounded-pill text-bg-light border">Published</span></div>
+                        <div class="cdm-muted small">${cat} · ${priceLabel}${oboPillMine ? ` ${oboPillMine}` : ""}${condBit} · <span class="badge rounded-pill text-bg-light border">Published</span></div>
                     </div>
                 </div>
                 <div class="d-flex flex-wrap gap-2 justify-content-end">
@@ -6555,6 +6594,13 @@ function renderListingDbFromApi(L, extra = null) {
         priceNum === 0
             ? `<span class="display-6 fw-bold text-dark">Free</span>`
             : `<span class="cdm-price-currency text-muted me-1">$</span><span class="display-6 fw-bold text-dark">${escapeHtml(priceNum.toFixed(2))}</span>`;
+    const oboRawL = L.orBestOffer ?? L.OrBestOffer;
+    const listingOboDetail =
+        oboRawL === true ||
+        oboRawL === 1 ||
+        (typeof oboRawL === "string" && ["1", "true", "yes"].includes(String(oboRawL).toLowerCase()));
+    const oboPillDetail = listingOrBestOfferBadgeHtml({ orBestOffer: listingOboDetail, priceNum });
+    const priceHtmlWithObo = `${priceHtml}${oboPillDetail ? `<div class="mt-2">${oboPillDetail}</div>` : ""}`;
 
     const titleHtml = escapeHtml(L.title);
     const conditionRaw = L.condition ?? L.Condition ?? null;
@@ -6706,7 +6752,7 @@ function renderListingDbFromApi(L, extra = null) {
         galleryHtml,
         titleHtml,
         subtitleHtml,
-        priceHtml,
+        priceHtml: priceHtmlWithObo,
         fulfillmentHtml,
         sellerStripHtml,
         metaRowsHtml,
