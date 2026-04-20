@@ -51,3 +51,10 @@ public sealed class MoveTransactionToDonationResponse
     public int ListingId { get; init; }
     public string Status { get; init; } = "cancelled";
 }
+
+public sealed class CancelTransactionResponse
+{
+    public int TransactionId { get; init; }
+    public int ListingId { get; init; }
+    public string Status { get; init; } = "cancelled";
+}

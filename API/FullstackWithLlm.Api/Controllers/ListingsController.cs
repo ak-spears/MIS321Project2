@@ -13,17 +13,20 @@ namespace FullstackWithLlm.Api.Controllers;
 public sealed class ListingsController : ControllerBase
 {
     private readonly ListingRepository _listings;
+    private readonly TransactionRepository _transactions;
     private readonly ListingMatchService _listingMatchService;
     private readonly RatingRepository _ratings;
     private readonly UserRepository _users;
 
     public ListingsController(
         ListingRepository listings,
+        TransactionRepository transactions,
         ListingMatchService listingMatchService,
         RatingRepository ratings,
         UserRepository users)
     {
         _listings = listings;
+        _transactions = transactions;
         _listingMatchService = listingMatchService;
         _ratings = ratings;
         _users = users;
@@ -172,6 +175,14 @@ public sealed class ListingsController : ControllerBase
             return StatusCode(
                 StatusCodes.Status403Forbidden,
                 "This account is on administrative probation and cannot post or edit listings.");
+        }
+
+        var hasOverdueFees = await _transactions.HasOverdueUnpaidFeesAsync(userId, 25m, 30, cancellationToken);
+        if (hasOverdueFees)
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                "You have more than $25 in unpaid platform fees older than 30 days. Settle your balance before posting new listings.");
         }
 
         var newId = await _listings.InsertAsync(userId, request, cancellationToken);

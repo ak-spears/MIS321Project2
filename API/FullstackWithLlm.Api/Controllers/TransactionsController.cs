@@ -164,4 +164,43 @@ public sealed class TransactionsController : ControllerBase
             }),
         };
     }
+
+    /// <summary>
+    /// Seller-only: cancel a pending transaction and relist the item as active so another buyer can purchase it.
+    /// </summary>
+    [HttpPost("{transactionId:int}/cancel-by-seller")]
+    [ProducesResponseType(typeof(CancelTransactionResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<CancelTransactionResponse>> CancelBySeller(
+        [FromRoute] int transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (transactionId <= 0)
+        {
+            return NotFound();
+        }
+
+        var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        {
+            return Unauthorized();
+        }
+
+        var result = await _transactions.CancelPendingBySellerAsync(transactionId, userId, cancellationToken);
+        return result.Outcome switch
+        {
+            TransactionRepository.CancelBySellerOutcome.NotFound => NotFound("Transaction not found."),
+            TransactionRepository.CancelBySellerOutcome.Forbidden => Forbid(),
+            TransactionRepository.CancelBySellerOutcome.Conflict => Conflict("Only pending unconfirmed sales can be cancelled by seller."),
+            _ => Ok(new CancelTransactionResponse
+            {
+                TransactionId = result.TransactionId,
+                ListingId = result.ListingId,
+                Status = "cancelled",
+            }),
+        };
+    }
 }

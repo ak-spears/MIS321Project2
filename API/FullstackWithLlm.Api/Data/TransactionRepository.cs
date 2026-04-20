@@ -25,6 +25,14 @@ public sealed class TransactionRepository
         Conflict,
     }
 
+    public enum CancelBySellerOutcome
+    {
+        Ok,
+        NotFound,
+        Forbidden,
+        Conflict,
+    }
+
     public sealed class ConfirmCompletionResult
     {
         public ConfirmCompletionOutcome Outcome { get; init; }
@@ -34,6 +42,13 @@ public sealed class TransactionRepository
     public sealed class MoveToDonationResult
     {
         public MoveToDonationOutcome Outcome { get; init; }
+        public int ListingId { get; init; }
+        public int TransactionId { get; init; }
+    }
+
+    public sealed class CancelBySellerResult
+    {
+        public CancelBySellerOutcome Outcome { get; init; }
         public int ListingId { get; init; }
         public int TransactionId { get; init; }
     }
@@ -565,7 +580,7 @@ public sealed class TransactionRepository
             }
 
             await using (var cancelTxCmd = new MySqlCommand(
-                             "UPDATE transactions SET status = 'cancelled' WHERE transaction_id = @tid AND status = 'pending';",
+                             "UPDATE transactions SET status = 'cancelled', platform_fee = 0, fee_paid_at = UTC_TIMESTAMP() WHERE transaction_id = @tid AND status = 'pending';",
                              conn,
                              dbTx))
             {
@@ -611,6 +626,160 @@ public sealed class TransactionRepository
         {
             await dbTx.RollbackAsync(cancellationToken);
             throw;
+        }
+    }
+
+    public async Task<CancelBySellerResult> CancelPendingBySellerAsync(
+        int transactionId,
+        int actorUserId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var dbTx = await conn.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            const string selectSql = """
+                SELECT transaction_id, listing_id, seller_id, status, buyer_confirmed_at, seller_confirmed_at
+                FROM transactions
+                WHERE transaction_id = @tid
+                FOR UPDATE;
+                """;
+
+            int listingId;
+            int sellerId;
+            string status;
+            bool buyerConfirmed;
+            bool sellerConfirmed;
+
+            await using (var selectCmd = new MySqlCommand(selectSql, conn, dbTx))
+            {
+                selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new CancelBySellerResult { Outcome = CancelBySellerOutcome.NotFound };
+                }
+
+                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                sellerId = reader.GetInt32(reader.GetOrdinal("seller_id"));
+                status = reader.GetString(reader.GetOrdinal("status"));
+                buyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at"));
+                sellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at"));
+                await reader.CloseAsync();
+            }
+
+            if (actorUserId != sellerId)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new CancelBySellerResult { Outcome = CancelBySellerOutcome.Forbidden };
+            }
+
+            if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase) || buyerConfirmed || sellerConfirmed)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new CancelBySellerResult { Outcome = CancelBySellerOutcome.Conflict };
+            }
+
+            await using (var cancelCmd = new MySqlCommand(
+                             "UPDATE transactions SET status = 'cancelled', platform_fee = 0, fee_paid_at = UTC_TIMESTAMP() WHERE transaction_id = @tid AND status = 'pending';",
+                             conn,
+                             dbTx))
+            {
+                cancelCmd.Parameters.AddWithValue("@tid", transactionId);
+                var n = await cancelCmd.ExecuteNonQueryAsync(cancellationToken);
+                if (n != 1)
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new CancelBySellerResult { Outcome = CancelBySellerOutcome.Conflict };
+                }
+            }
+
+            await using (var listingCmd = new MySqlCommand(
+                             """
+                             UPDATE listings
+                             SET status = 'active'
+                             WHERE listing_id = @lid AND seller_id = @sid AND status = 'sold';
+                             """,
+                             conn,
+                             dbTx))
+            {
+                listingCmd.Parameters.AddWithValue("@lid", listingId);
+                listingCmd.Parameters.AddWithValue("@sid", sellerId);
+                var n = await listingCmd.ExecuteNonQueryAsync(cancellationToken);
+                if (n != 1)
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new CancelBySellerResult { Outcome = CancelBySellerOutcome.Conflict };
+                }
+            }
+
+            await dbTx.CommitAsync(cancellationToken);
+            return new CancelBySellerResult
+            {
+                Outcome = CancelBySellerOutcome.Ok,
+                ListingId = listingId,
+                TransactionId = transactionId,
+            };
+        }
+        catch
+        {
+            await dbTx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// True when seller has more than <paramref name="thresholdUsd"/> in unpaid platform fees
+    /// from completed transactions older than <paramref name="overdueDays"/>.
+    /// </summary>
+    public async Task<bool> HasOverdueUnpaidFeesAsync(
+        int sellerId,
+        decimal thresholdUsd = 25m,
+        int overdueDays = 30,
+        CancellationToken cancellationToken = default)
+    {
+        if (sellerId <= 0)
+        {
+            return false;
+        }
+
+        if (thresholdUsd <= 0m)
+        {
+            thresholdUsd = 25m;
+        }
+
+        if (overdueDays < 1)
+        {
+            overdueDays = 30;
+        }
+
+        await using var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        const string sql = """
+            SELECT COALESCE(SUM(platform_fee), 0)
+            FROM transactions
+            WHERE seller_id = @sid
+              AND status = 'completed'
+              AND fee_paid_at IS NULL
+              AND created_at <= UTC_TIMESTAMP() - INTERVAL @days DAY;
+            """;
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@sid", sellerId);
+        cmd.Parameters.AddWithValue("@days", overdueDays);
+
+        try
+        {
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
+            var total = scalar == null || scalar == DBNull.Value ? 0m : Convert.ToDecimal(scalar);
+            return total > thresholdUsd;
+        }
+        catch (MySqlException ex) when (ex.Number == 1054)
+        {
+            // Older schema without fee_paid_at should not block posting.
+            return false;
         }
     }
 }

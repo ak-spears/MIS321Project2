@@ -163,11 +163,13 @@ function clearClientAuthSession() {
 const LISTINGS_STORAGE_KEY = "cdm_my_listings_v1";
 /** Local-only checkout / claim history until API persists transactions. */
 const TRANSACTIONS_STORAGE_KEY = "cdm_transactions_v1";
+const TRANSACTION_DONATION_FLAGS_KEY = "cdm_tx_donated_v1";
 /** Local-only buyer/seller conversations (per browser, any account used on this device). */
 const MESSAGES_STORAGE_KEY = "cdm_messages_v1";
 
 /** On paid listings, Bama Marketplace collects a 7% marketplace fee from sale proceeds (buyer pays list price only). */
 const PLATFORM_FEE_RATE = 0.07;
+const DEMO_GUEST_USER_ID = 900001;
 
 const state = {
     apiHealth: { status: "unknown" },
@@ -239,6 +241,8 @@ const state = {
     txFilter: /** @type {'all' | 'action'} */ ("all"),
     /** Runtime mode: live API data or demo fallback when backend is unavailable. */
     appMode: /** @type {'live' | 'demo-fallback'} */ ("live"),
+    /** Avoid repeated complementary re-fetch loops on checkout. */
+    checkoutSuggestionHydratedKey: /** @type {string | null} */ (null),
 };
 
 /**
@@ -437,6 +441,139 @@ function clearLocalTransactions() {
     localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
 }
 
+function getTransactionDonationFlags() {
+    try {
+        const raw = localStorage.getItem(TRANSACTION_DONATION_FLAGS_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function setTransactionDonationFlags(flags) {
+    localStorage.setItem(TRANSACTION_DONATION_FLAGS_KEY, JSON.stringify(flags && typeof flags === "object" ? flags : {}));
+}
+
+function hasTransactionDonationFlag(txId) {
+    const id = Number(txId);
+    if (!Number.isFinite(id) || id <= 0) return false;
+    const flags = getTransactionDonationFlags();
+    return Boolean(flags[String(id)]);
+}
+
+function markTransactionDonationFlag(txId, moved) {
+    const id = Number(txId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    const flags = getTransactionDonationFlags();
+    if (moved) flags[String(id)] = true;
+    else delete flags[String(id)];
+    setTransactionDonationFlags(flags);
+}
+
+function upsertLocalDemoTransactionByRowId(rowId, txId = null, listingKey = "") {
+    const id = String(rowId || "").trim();
+    const lk = String(listingKey || "").trim();
+    if (!id) return null;
+    const list = loadLocalTransactions();
+    const hit = list.find(
+        (x) =>
+            String(x?.id || "") === id ||
+            (Number.isFinite(Number(txId)) && Number(txId) > 0 && Number(x?.transactionId) === Number(txId)) ||
+            (lk && String(x?.listingKey || "").trim() === lk),
+    );
+    if (hit) return hit;
+    const demo = buildDemoTransactionRows().find(
+        (x) =>
+            String(x?.id || "") === id ||
+            (Number.isFinite(Number(txId)) && Number(txId) > 0 && Number(x?.transactionId) === Number(txId)) ||
+            (lk && String(x?.listingKey || "").trim() === lk),
+    );
+    if (!demo) return null;
+    list.push(demo);
+    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
+    return demo;
+}
+
+function patchLocalTransactionByRowId(rowId, patcher, txId = null, listingKey = "") {
+    const id = String(rowId || "").trim();
+    const lk = String(listingKey || "").trim();
+    if ((!id && !(Number.isFinite(Number(txId)) && Number(txId) > 0) && !lk) || typeof patcher !== "function") return false;
+    const list = loadLocalTransactions();
+    const idx = list.findIndex(
+        (x) =>
+            String(x?.id || "") === id ||
+            (Number.isFinite(Number(txId)) && Number(txId) > 0 && Number(x?.transactionId) === Number(txId)) ||
+            (lk && String(x?.listingKey || "").trim() === lk),
+    );
+    if (idx < 0) return false;
+    const next = patcher({ ...list[idx] });
+    if (!next || typeof next !== "object") return false;
+    list[idx] = { ...list[idx], ...next };
+    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
+    return true;
+}
+
+function forceUpsertLocalDemoTransaction(seed, patcher) {
+    const list = loadLocalTransactions();
+    const rowId = String(seed?.rowId || "").trim();
+    const txId = Number(seed?.txId);
+    const listingKey = String(seed?.listingKey || "").trim();
+    const title = String(seed?.title || "Listing").trim() || "Listing";
+    const txRole = String(seed?.txRole || "sell").toLowerCase() === "buy" ? "buy" : "sell";
+    const nowIso = new Date().toISOString();
+    let idx = list.findIndex(
+        (x) =>
+            (rowId && String(x?.id || "") === rowId) ||
+            (Number.isFinite(txId) && txId > 0 && Number(x?.transactionId) === txId) ||
+            (listingKey && String(x?.listingKey || "").trim() === listingKey),
+    );
+    if (idx < 0) {
+        list.push({
+            id: rowId || `demo-${Date.now()}`,
+            fromServer: false,
+            createdAt: nowIso,
+            title,
+            listingKey: listingKey || `demo:${Date.now()}`,
+            listingId: null,
+            photoDataUrl: "",
+            kind: "purchase",
+            listPrice: 0,
+            platformFee: 0,
+            sellerNet: 0,
+            status: "awaiting_chat",
+            paymentMethod: "cash",
+            buyerUserId: txRole === "buy" ? DEMO_GUEST_USER_ID : 8123,
+            buyerDisplayName: txRole === "buy" ? "You" : "Demo Buyer",
+            sellerUserId: txRole === "sell" ? DEMO_GUEST_USER_ID : 9001,
+            sellerDisplayName: txRole === "sell" ? "You" : "Campus Seller",
+            txRole,
+            transactionId: Number.isFinite(txId) && txId > 0 ? txId : null,
+            buyerConfirmed: false,
+            sellerConfirmed: false,
+            donationMoved: false,
+        });
+        idx = list.length - 1;
+    }
+    const next = typeof patcher === "function" ? patcher({ ...list[idx] }) : list[idx];
+    list[idx] = { ...list[idx], ...next, fromServer: false };
+    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
+    return true;
+}
+
+function dedupeTransactionRows(rows) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(rows) ? rows : []).forEach((r) => {
+        const id = String(r?.id || "").trim();
+        const k = id || `${String(r?.listingKey || "")}|${String(r?.createdAt || "")}|${String(r?.txRole || "")}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push(r);
+    });
+    return out;
+}
+
 /** Maps GET /api/transactions/mine | /sales row → UI row (matches localStorage shape). */
 function mapServerTransactionToRow(d, txRole = "buy") {
     const amount = Number(d.amount);
@@ -472,6 +609,10 @@ function mapServerTransactionToRow(d, txRole = "buy") {
         createdAt: createdAt || new Date().toISOString(),
         title: d.title,
         listingKey: `db:${lid}`,
+        photoDataUrl:
+            lid != null && state.feedThumbSrcByKey && state.feedThumbSrcByKey[`db:${lid}`]
+                ? String(state.feedThumbSrcByKey[`db:${lid}`]).trim()
+                : "",
         listingId: lid,
         kind: isPurchase ? "purchase" : "claim",
         listPrice: amount,
@@ -485,11 +626,13 @@ function mapServerTransactionToRow(d, txRole = "buy") {
         sellerDisplayName,
         buyerConfirmed,
         sellerConfirmed,
+        donationMoved: hasTransactionDonationFlag(tid),
         txRole,
     };
 }
 
-function transactionStatusLabel(status, isSellerView = false) {
+function transactionStatusLabel(status, isSellerView = false, donationMoved = false) {
+    if (donationMoved) return isSellerView ? "Item donated" : "Seller donated item";
     const s = String(status || "").toLowerCase();
     if (s === "pending" || s === "awaiting_chat") {
         return isSellerView ? "Next: coordinate with buyer" : "Next: message seller";
@@ -500,7 +643,8 @@ function transactionStatusLabel(status, isSellerView = false) {
 }
 
 /** Big friendly status line (Bama Marketplace ≠ corporate order copy). */
-function transactionStatusHeadline(status, kind, isSellerView = false) {
+function transactionStatusHeadline(status, kind, isSellerView = false, donationMoved = false) {
+    if (donationMoved) return isSellerView ? "Item moved to donations" : "Seller moved this to donations";
     const s = String(status || "").toLowerCase();
     const isPurchase = kind === "purchase";
     if (s === "awaiting_chat" || s === "pending") {
@@ -532,7 +676,6 @@ function transactionPurchaseMoneyHtml(t, isSellerView) {
     if (!Number.isFinite(fee) || fee < 0) fee = platformFeeFromSale(list);
     let net = Number(t.sellerNet);
     if (!Number.isFinite(net) || net < 0) net = sellerNetFromSale(list);
-    const feeBuyer = "Platform fee (7%, seller side)";
     const feeSeller = "Platform fee (7%, from proceeds)";
 
     if (isSellerView) {
@@ -557,16 +700,12 @@ function transactionPurchaseMoneyHtml(t, isSellerView) {
             <span>List price</span>
             <span class="cdm-tx-fee-amt">${formatUsd(list)}</span>
         </div>
-        <div class="cdm-tx-fee-row cdm-tx-fee-row--muted">
-            <span>${feeBuyer}</span>
-            <span class="cdm-tx-fee-amt">${formatUsd(fee)}</span>
-        </div>
         <div class="cdm-tx-fee-row cdm-tx-fee-row--strong">
             <span>Total you paid</span>
             <span class="cdm-tx-fee-amt">${formatUsd(list)}</span>
         </div>
     </div>
-    <p class="cdm-tx-footnote mb-0 mt-2">This fee isn\u2019t added on top of your total \u2014 it comes from the seller\u2019s side.</p>`;
+    <p class="cdm-tx-footnote mb-0 mt-2">No extra checkout fee is added to your total.</p>`;
 }
 
 function transactionClaimMoneyHtml() {
@@ -645,13 +784,33 @@ function formatRelativeTimeShort(iso) {
     }
 }
 
-const TX_THUMB_EMOJI = ["📦", "🛏️", "🧊", "💡", "📚", "🪑", "🎒", "🧺"];
-
 function transactionThumbEmoji(title) {
-    const str = String(title || "item");
-    let h = 0;
-    for (let i = 0; i < str.length; i++) h = (h + str.charCodeAt(i)) % 997;
-    return TX_THUMB_EMOJI[h % TX_THUMB_EMOJI.length];
+    const t = String(title || "").toLowerCase();
+    if (!t) return "📦";
+
+    const has = (arr) => arr.some((k) => t.includes(k));
+
+    if (has(["comforter", "pillow", "mattress", "bed", "blanket", "bedding"])) return "🛏️";
+    if (has(["fridge", "freezer", "mini-fridge"])) return "🧊";
+    if (has(["microwave", "appliance", "toaster", "kettle"])) return "🍽️";
+    if (has(["lamp", "light", "led"])) return "💡";
+    if (has(["desk", "chair", "stool", "hutch", "shelf", "table"])) return "🪑";
+    if (has(["book", "textbook", "calc", "calculator", "notebook"])) return "📚";
+    if (has(["laundry", "hamper", "basket", "caddy", "bath", "shower"])) return "🧺";
+    if (has(["backpack", "bag"])) return "🎒";
+    if (has(["cart", "storage", "bin", "drawer"])) return "🗄️";
+
+    return "📦";
+}
+
+function transactionThumbMediaHtml(t) {
+    const photo =
+        (t?.photoDataUrl && String(t.photoDataUrl).trim()) ||
+        (t?.listingKey && state.feedThumbSrcByKey?.[String(t.listingKey)] ? String(state.feedThumbSrcByKey[String(t.listingKey)]).trim() : "");
+    if (photo) {
+        return `<img src="${escapeAttrForDoubleQuoted(photo)}" alt="${escapeAttrForDoubleQuoted(String(t?.title || "Item"))}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;" />`;
+    }
+    return escapeHtml(transactionThumbEmoji(t?.title));
 }
 
 function formatUsd(amount) {
@@ -712,12 +871,33 @@ function formatCheckoutPickupUrgencyHtml(ctx) {
  * @param {number} limit
  */
 function getCheckoutComplementaryItems(ctx, limit = 3) {
-    const pool = Array.isArray(state.feedItemsCache) ? state.feedItemsCache : [];
+    const poolFromCache = Array.isArray(state.feedItemsCache) && state.feedItemsCache.length > 0 ? state.feedItemsCache : [];
+    const ctxKey = String(ctx?.key || "").trim().toLowerCase();
+    const pool =
+        poolFromCache.length > 0
+            ? poolFromCache
+            : ctxKey.startsWith("sample:")
+              ? SAMPLE_HOME_FEED.map((x) => ({
+                    key: `sample:${x.id}`,
+                    title: x.title,
+                    blurb: x.blurb,
+                    priceLabel: x.priceLabel,
+                    priceNum: Number(x.priceNum) || 0,
+                    photoDataUrl: x.photoDataUrl || demoThumbSvgDataUrl(x.title),
+                    campusId: x.campusId ?? 1,
+                    gapSolution: x.gapSolution ?? null,
+                    condition: null,
+                    categorySlug: x.categorySlug ?? null,
+                    listingKind: Number(x.priceNum) > 0 ? "sell" : "donate",
+                    spaceSuitability: x.spaceSuitability ?? null,
+                    matchScore: null,
+                }))
+              : [];
     if (!pool.length) return [];
     const primaryTitle = String(ctx?.title || "").toLowerCase();
     const titleTokens = primaryTitle.split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
     const primaryId = Number(ctx?.listingId);
-    const primaryKey = String(ctx?.key || "").trim().toLowerCase();
+    const primaryKey = ctxKey;
     const blockedWords = new Set(["the", "for", "and", "with", "from", "you", "your"]);
     const tokenSet = new Set(titleTokens.filter((t) => !blockedWords.has(t)));
 
@@ -1006,6 +1186,7 @@ function buildDemoTransactionRows() {
             createdAt: mkIsoDaysAgo(2),
             title: paid[0].title,
             listingKey: `sample:${paid[0].id}`,
+            photoDataUrl: paid[0].photoDataUrl || demoThumbSvgDataUrl(paid[0].title),
             listingId: null,
             kind: "purchase",
             listPrice: p,
@@ -1031,6 +1212,7 @@ function buildDemoTransactionRows() {
             createdAt: mkIsoDaysAgo(8),
             title: paid[1].title,
             listingKey: `sample:${paid[1].id}`,
+            photoDataUrl: paid[1].photoDataUrl || demoThumbSvgDataUrl(paid[1].title),
             listingId: null,
             kind: "purchase",
             listPrice: p,
@@ -1053,10 +1235,11 @@ function buildDemoTransactionRows() {
         out.push({
             id: "demo-sell-1",
             fromServer: false,
-            createdAt: mkIsoDaysAgo(5),
+            createdAt: mkIsoDaysAgo(16),
             title: paid[2].title,
             listingKey: `sample:${paid[2].id}`,
-            listingId: null,
+            photoDataUrl: paid[2].photoDataUrl || demoThumbSvgDataUrl(paid[2].title),
+            listingId: 5001,
             kind: "purchase",
             listPrice: p,
             platformFee: platformFeeFromSale(p),
@@ -1068,7 +1251,7 @@ function buildDemoTransactionRows() {
             sellerUserId: parseJwtSub(state.token),
             sellerDisplayName: state.authEmail || "You",
             txRole: "sell",
-            transactionId: null,
+            transactionId: 7001,
             buyerConfirmed: false,
             sellerConfirmed: false,
         });
@@ -1794,6 +1977,7 @@ function navigateToCheckout(ctx) {
     }
     state.checkoutSuccess = null;
     state.checkoutContext = ctx;
+    state.checkoutSuggestionHydratedKey = null;
     state.view = "checkout";
     render();
 }
@@ -1811,6 +1995,10 @@ function navigateMessages() {
 
 function isAuthed() {
     return Boolean(state.token);
+}
+
+function isDemoGuestMode() {
+    return !state.token && (state.appMode === "demo-fallback" || state.apiHealth?.status === "down");
 }
 
 function authHeaders() {
@@ -1847,7 +2035,7 @@ function feedAuthHeaders() {
 
 /** JWT `sub` (user id) for comparing with listing sellerId. */
 function parseJwtSub(token) {
-    if (!token) return null;
+    if (!token) return isDemoGuestMode() ? DEMO_GUEST_USER_ID : null;
     try {
         const parts = token.split(".");
         if (parts.length < 2) return null;
@@ -2014,7 +2202,7 @@ function findConversationForCurrentUserByListingKey(listingKey) {
  * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
  */
 function openMessagesForListing(payload) {
-    if (!isAuthed()) {
+    if (!isAuthed() && !isDemoGuestMode()) {
         state.afterLoginIntent = { type: "navigate", view: "messages" };
         navigateAuth("login");
         return;
@@ -2041,7 +2229,7 @@ function openMessagesForListing(payload) {
  * @param {{ listingKey: string, listingTitle: string, buyerUserId: number, buyerLabel: string }} payload
  */
 function openMessagesWithBuyerForListing(payload) {
-    if (!isAuthed()) {
+    if (!isAuthed() && !isDemoGuestMode()) {
         state.afterLoginIntent = { type: "navigate", view: "messages" };
         navigateAuth("login");
         return;
@@ -2313,7 +2501,7 @@ async function refreshAuthProfileCache() {
 }
 
 function requireAuth(intent) {
-    if (isAuthed()) return true;
+    if (isAuthed() || isDemoGuestMode()) return true;
     state.afterLoginIntent = intent ?? null;
     navigateAuth("login");
     return false;
@@ -2529,7 +2717,33 @@ function wireNav(root) {
     });
     root.querySelectorAll("[data-action='tx-confirm-complete']").forEach((btn) => {
         btn.addEventListener("click", async () => {
+            const isDemo = String(btn.getAttribute("data-demo") || "").toLowerCase() === "true";
+            const rowId = String(btn.getAttribute("data-tx-row-id") || "").trim();
+            const txRole = String(btn.getAttribute("data-tx-role") || "").trim().toLowerCase();
             const txId = Number(btn.getAttribute("data-transaction-id"));
+            const listingKey = String(btn.getAttribute("data-listing-key") || "").trim();
+            const title = String(btn.getAttribute("data-listing-title") || "Listing");
+            if (isDemo) {
+                upsertLocalDemoTransactionByRowId(rowId, txId, listingKey);
+                const ok = patchLocalTransactionByRowId(rowId, (row) => {
+                    const sellerView = txRole === "sell";
+                    if (sellerView) row.sellerConfirmed = true;
+                    else row.buyerConfirmed = true;
+                    if (Boolean(row.buyerConfirmed) && Boolean(row.sellerConfirmed)) row.status = "completed";
+                    return row;
+                }, txId, listingKey);
+                if (!ok) {
+                    forceUpsertLocalDemoTransaction({ rowId, txId, listingKey, title, txRole }, (row) => {
+                        const sellerView = txRole === "sell";
+                        if (sellerView) row.sellerConfirmed = true;
+                        else row.buyerConfirmed = true;
+                        if (Boolean(row.buyerConfirmed) && Boolean(row.sellerConfirmed)) row.status = "completed";
+                        return row;
+                    });
+                }
+                renderTransactions();
+                return;
+            }
             if (!Number.isFinite(txId) || txId <= 0) return;
             if (!state.token || isJwtLikelyExpired(state.token)) {
                 clearClientAuthSession();
@@ -2567,10 +2781,99 @@ function wireNav(root) {
             renderTransactions();
         });
     });
+    root.querySelectorAll("[data-action='tx-cancel-sale']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const isDemo = String(btn.getAttribute("data-demo") || "").toLowerCase() === "true";
+            const rowId = String(btn.getAttribute("data-tx-row-id") || "").trim();
+            const txId = Number(btn.getAttribute("data-transaction-id"));
+            const listingKey = String(btn.getAttribute("data-listing-key") || "").trim();
+            const title = String(btn.getAttribute("data-listing-title") || "this listing");
+            if (isDemo) {
+                upsertLocalDemoTransactionByRowId(rowId, txId, listingKey);
+                const ok = patchLocalTransactionByRowId(rowId, (row) => ({ ...row, status: "cancelled" }), txId, listingKey);
+                if (!ok) {
+                    forceUpsertLocalDemoTransaction({ rowId, txId, listingKey, title, txRole: "sell" }, (row) => ({
+                        ...row,
+                        status: "cancelled",
+                    }));
+                }
+                renderTransactions();
+                return;
+            }
+            if (!Number.isFinite(txId) || txId <= 0) return;
+            if (
+                !confirm(
+                    `Cancel sale for "${title}"?\n\nThis reopens the listing so someone else can buy or claim it.`,
+                )
+            ) {
+                return;
+            }
+            const oldText = btn.textContent;
+            btn.setAttribute("disabled", "true");
+            btn.setAttribute("aria-disabled", "true");
+            btn.textContent = "Cancelling...";
+            let res;
+            let data;
+            try {
+                ({ res, data } = await apiJson(`/api/transactions/${txId}/cancel-by-seller`, { method: "POST" }));
+            } catch {
+                alert("Couldn’t cancel this sale right now. Try again.");
+                btn.removeAttribute("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.textContent = oldText;
+                return;
+            }
+            if (res.status === 401) {
+                clearClientAuthSession();
+                navigateAuth("login");
+                return;
+            }
+            if (!res.ok) {
+                alert(parseApiError(data, "Couldn’t cancel this sale."));
+                btn.removeAttribute("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.textContent = oldText;
+                return;
+            }
+            markTransactionDonationFlag(txId, false);
+            alert("Sale cancelled. Listing is active again for new buyers.");
+            renderTransactions();
+        });
+    });
     root.querySelectorAll("[data-action='tx-move-donation']").forEach((btn) => {
         btn.addEventListener("click", async () => {
+            const isDemo = String(btn.getAttribute("data-demo") || "").toLowerCase() === "true";
+            const rowId = String(btn.getAttribute("data-tx-row-id") || "").trim();
             const txId = Number(btn.getAttribute("data-transaction-id"));
+            const listingKey = String(btn.getAttribute("data-listing-key") || "").trim();
             const title = String(btn.getAttribute("data-listing-title") || "this listing");
+            if (isDemo) {
+                upsertLocalDemoTransactionByRowId(rowId, txId, listingKey);
+                const ok = patchLocalTransactionByRowId(rowId, (row) => ({
+                    ...row,
+                    status: "cancelled",
+                    kind: "claim",
+                    listPrice: 0,
+                    platformFee: 0,
+                    sellerNet: 0,
+                    paymentMethod: "cash",
+                    donationMoved: true,
+                }), txId, listingKey);
+                if (!ok) {
+                    forceUpsertLocalDemoTransaction({ rowId, txId, listingKey, title, txRole: "sell" }, (row) => ({
+                        ...row,
+                        status: "cancelled",
+                        kind: "claim",
+                        listPrice: 0,
+                        platformFee: 0,
+                        sellerNet: 0,
+                        paymentMethod: "cash",
+                        donationMoved: true,
+                    }));
+                }
+                renderTransactions();
+                return;
+            }
             if (!Number.isFinite(txId) || txId <= 0) return;
             if (
                 !confirm(
@@ -2615,6 +2918,7 @@ function wireNav(root) {
             }
 
             const listingId = Number(data?.listingId ?? data?.ListingId ?? btn.getAttribute("data-listing-id"));
+            markTransactionDonationFlag(txId, true);
             if (!Number.isFinite(listingId) || listingId <= 0) {
                 alert("Moved to donations, but listing id was missing. Open My donations to edit.");
                 navigate("my-donations");
@@ -2622,7 +2926,8 @@ function wireNav(root) {
             }
             state.editingListingId = listingId;
             state.postEditPrefill = null;
-            navigate("donate-post");
+            alert("Item moved to donations. You can find it in My donations.");
+            navigate("my-donations");
         });
     });
     root.querySelectorAll("[data-action='view-listing']").forEach((btn) => {
@@ -8256,7 +8561,7 @@ function wireCheckoutPage(root) {
             btn.classList.toggle("btn-dark", isSelected);
             btn.classList.toggle("btn-outline-dark", !isSelected);
             btn.setAttribute("aria-pressed", isSelected ? "true" : "false");
-            if (isSelected && Number.isFinite(listingId) && listingId > 0 && Number.isFinite(price) && price > 0) {
+            if (isSelected && key && Number.isFinite(price) && price > 0) {
                 selected.push({ key, title, price, listingId });
             }
         });
@@ -8301,7 +8606,7 @@ function wireCheckoutPage(root) {
         const ctx = state.checkoutContext;
         if (!ctx) return;
         showCheckoutError(root, "");
-        if (!state.token) {
+        if (!state.token && !isDemoGuestMode()) {
             requireAuth({ type: "buy", listingKey: String(ctx.key ?? "") });
             return;
         }
@@ -8404,13 +8709,68 @@ function wireCheckoutPage(root) {
                 /* ignore */
             }
         } else {
-            showCheckoutError(
-                root,
-                escapeHtml(
-                    "This item can’t be checked out here — open it from the live Home feed (a real listing with a number), then try again.",
-                ),
-            );
-            return;
+            const paymentMethod = getSelectedPaymentMethod();
+            const nowIso = new Date().toISOString();
+            const selectedBundleItems = addButtons
+                .filter((x) => selectedBundleKeys.has(String(x.getAttribute("data-listing-key") || "").trim()))
+                .map((x) => ({
+                    key: String(x.getAttribute("data-listing-key") || "").trim(),
+                    title: String(x.getAttribute("data-title") || "Item"),
+                    price: Number(x.getAttribute("data-price")),
+                }))
+                .filter((x) => x.key && Number.isFinite(x.price) && x.price > 0);
+            const localRows = loadLocalTransactions();
+            const primaryKey = String(ctx.key || `local:${Date.now()}`);
+            const primaryPrice = Number(ctx.price);
+            const paid = Number.isFinite(primaryPrice) && primaryPrice > 0;
+            localRows.push({
+                id: `local-${Date.now()}`,
+                fromServer: false,
+                createdAt: nowIso,
+                title: String(ctx.title || "Listing"),
+                listingKey: primaryKey,
+                listingId: null,
+                photoDataUrl: ctx.imageUrl && String(ctx.imageUrl).trim() ? String(ctx.imageUrl).trim() : "",
+                kind: paid ? "purchase" : "claim",
+                listPrice: paid ? primaryPrice : 0,
+                platformFee: paid ? platformFeeFromSale(primaryPrice) : 0,
+                sellerNet: paid ? sellerNetFromSale(primaryPrice) : 0,
+                status: "awaiting_chat",
+                paymentMethod,
+                buyerUserId: parseJwtSub(state.token),
+                buyerDisplayName: state.authEmail || "You",
+                sellerUserId: ctx.sellerUserId ?? null,
+                sellerDisplayName: String(ctx.sellerDisplayName || "Seller"),
+                txRole: "buy",
+                buyerConfirmed: false,
+                sellerConfirmed: false,
+            });
+            selectedBundleItems.forEach((x, idx) => {
+                localRows.push({
+                    id: `local-bundle-${Date.now()}-${idx}`,
+                    fromServer: false,
+                    createdAt: nowIso,
+                    title: x.title,
+                    listingKey: x.key,
+                    listingId: null,
+                    photoDataUrl: "",
+                    kind: "purchase",
+                    listPrice: x.price,
+                    platformFee: platformFeeFromSale(x.price),
+                    sellerNet: sellerNetFromSale(x.price),
+                    status: "awaiting_chat",
+                    paymentMethod,
+                    buyerUserId: parseJwtSub(state.token),
+                    buyerDisplayName: state.authEmail || "You",
+                    sellerUserId: null,
+                    sellerDisplayName: "Seller",
+                    txRole: "buy",
+                    buyerConfirmed: false,
+                    sellerConfirmed: false,
+                });
+            });
+            localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(localRows));
+            successfulListingIds = [0, ...selectedBundleItems.map(() => 0)];
         }
 
         let sellerUid =
@@ -8482,7 +8842,22 @@ function renderCheckout() {
         : "Confirm your free claim so the seller knows you’re coming. Same respect as a paid pickup.";
 
     const pickupUrgencyHtml = formatCheckoutPickupUrgencyHtml(ctx);
-    const complementary = isSale ? getCheckoutComplementaryItems(ctx, 3) : [];
+    let complementary = isSale ? getCheckoutComplementaryItems(ctx, 3) : [];
+    if (isSale && complementary.length === 0) {
+        const hydrateKey = String(ctx?.key || "");
+        if (hydrateKey && state.checkoutSuggestionHydratedKey !== hydrateKey) {
+            state.checkoutSuggestionHydratedKey = hydrateKey;
+            void (async () => {
+                const items = await fetchFeedItemsForHome();
+                state.feedItemsCache = items;
+                if (state.view === "checkout" && state.checkoutContext && String(state.checkoutContext.key || "") === hydrateKey) {
+                    renderCheckout();
+                }
+            })();
+        }
+        complementary =
+            Array.isArray(state.feedItemsCache) && state.feedItemsCache.length > 0 ? getCheckoutComplementaryItems(ctx, 3) : [];
+    }
 
     const missionWhyCollapsible = `
         <div class="mb-3">
@@ -8639,7 +9014,6 @@ function renderCheckout() {
         ? `<div class="cdm-checkout-badge cdm-checkout-badge--warm">Campus sale · seller’s choice</div>`
         : `<div class="cdm-checkout-badge">Free · donated on Bama Marketplace</div>`;
 
-    const platformFee = isSale ? platformFeeFromSale(ctx.price) : 0;
     const moneyBlockHtml = isSale
         ? `<div class="cdm-checkout-money" role="group" aria-label="Price breakdown">
             <span id="checkout-base-total" data-base-total="${escapeHtml(String(Number(ctx.price) || 0))}" class="d-none"></span>
@@ -8647,11 +9021,7 @@ function renderCheckout() {
                 <span class="cdm-checkout-money-label">List price</span>
                 <span class="cdm-checkout-money-amt">${formatUsd(ctx.price)}</span>
             </div>
-            <div class="cdm-checkout-money-row cdm-checkout-money-row--muted">
-                <span class="cdm-checkout-money-label">Platform fee (7%, seller side)</span>
-                <span class="cdm-checkout-money-amt">${formatUsd(platformFee)}</span>
-            </div>
-            <p class="cdm-checkout-money-note small mb-2">This fee is not added to your total — you pay the list price to the seller.</p>
+            <p class="cdm-checkout-money-note small mb-2">No extra checkout fee is added — you pay only the list price to the seller.</p>
             <div class="cdm-checkout-money-row cdm-checkout-money-row--total">
                 <span class="cdm-checkout-money-label">Total you pay</span>
                 <span class="cdm-checkout-money-amt" id="checkout-total-pay">${formatUsd(ctx.price)}</span>
@@ -8687,7 +9057,8 @@ function renderCheckout() {
                         const key = String(item?.key || "").trim();
                         const lid = key.startsWith("db:") ? Number(key.slice(3)) : NaN;
                         const price = Number(item?.priceNum);
-                        if (!key || !Number.isFinite(lid) || lid <= 0 || !Number.isFinite(price) || price <= 0) return "";
+                        if (!key || !Number.isFinite(price) || price <= 0) return "";
+                        const apiReservable = Number.isFinite(lid) && lid > 0;
                         const img =
                             item?.photoDataUrl && String(item.photoDataUrl).trim()
                                 ? String(item.photoDataUrl).trim()
@@ -8710,7 +9081,7 @@ function renderCheckout() {
                                 class="btn btn-sm btn-outline-dark rounded-pill"
                                 data-action="checkout-toggle-bundle"
                                 data-listing-key="${escapeAttrForDoubleQuoted(key)}"
-                                data-listing-id="${escapeAttrForDoubleQuoted(String(lid))}"
+                                data-listing-id="${escapeAttrForDoubleQuoted(apiReservable ? String(lid) : "")}"
                                 data-price="${escapeAttrForDoubleQuoted(String(price))}"
                                 data-title="${escapeAttrForDoubleQuoted(String(item.title || "Item"))}"
                                 aria-pressed="false"
@@ -8836,13 +9207,6 @@ function renderCheckout() {
     root.appendChild(shell);
     wireNav(shell);
     wireCheckoutPage(shell);
-    if (signedInNoDbListing) {
-        const btn = root.querySelector("#checkout-confirm-btn");
-        if (btn) {
-            btn.disabled = true;
-            btn.setAttribute("aria-disabled", "true");
-        }
-    }
     ensureAuthUi();
 }
 
@@ -8978,8 +9342,9 @@ function renderTransactions() {
         let sellServer = [];
         let apiBuyOk = false;
         let apiSellOk = false;
-        let fallbackMode = state.appMode === "demo-fallback" || state.apiHealth?.status === "down";
-        if (state.token && !isJwtLikelyExpired(state.token) && !fallbackMode) {
+        let fallbackMode = state.apiHealth?.status === "down";
+        const signedIn = Boolean(state.token) && !isJwtLikelyExpired(state.token);
+        if (signedIn) {
             try {
                 const [mineRes, salesRes] = await Promise.all([
                     apiJson("/api/transactions/mine?limit=48"),
@@ -9011,7 +9376,11 @@ function renderTransactions() {
         } else if (state.token && isJwtLikelyExpired(state.token)) {
             clearClientAuthSession();
         }
-        const localDemo = loadLocalTransactions().filter((t) => t.listingId == null);
+        const localDemo = fallbackMode
+            ? loadLocalTransactions().filter((t) => t?.fromServer === false || t.listingId == null)
+            : !signedIn
+              ? loadLocalTransactions().filter((t) => t?.fromServer === false || t.listingId == null)
+              : [];
         const demoFallbackRows = fallbackMode ? buildDemoTransactionRows() : [];
         renderTransactionsMounted({
             buyRows: buyServer,
@@ -9031,10 +9400,12 @@ function renderTransactionsMounted(opts) {
     const { buyRows, sellRows, localDemo, demoFallbackRows, fallbackMode, apiBuyOk, apiSellOk, serverBuyCount, serverSellCount } = opts;
     const fallbackBuy = Array.isArray(demoFallbackRows) ? demoFallbackRows.filter((r) => r.txRole === "buy") : [];
     const fallbackSell = Array.isArray(demoFallbackRows) ? demoFallbackRows.filter((r) => r.txRole === "sell") : [];
-    const mergedBuy = [...buyRows, ...localDemo, ...fallbackBuy].sort(
+    const canUseDemoBuy = fallbackMode || !state.token || !apiBuyOk;
+    const canUseDemoSell = fallbackMode || !state.token || !apiSellOk;
+    const mergedBuy = dedupeTransactionRows([...buyRows, ...(canUseDemoBuy ? localDemo : []), ...(canUseDemoBuy ? fallbackBuy : [])]).sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
-    const mergedSell = [...sellRows, ...fallbackSell].sort(
+    const mergedSell = dedupeTransactionRows([...sellRows, ...(canUseDemoSell ? localDemo.filter((r) => r.txRole === "sell") : []), ...(canUseDemoSell ? fallbackSell : [])]).sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
     const rows = state.txRole === "sell" ? mergedSell : mergedBuy;
@@ -9171,7 +9542,8 @@ function renderTransactionsMounted(opts) {
                     ? `<span class="cdm-tx-kind cdm-tx-kind--sale">Paid</span>`
                     : `<span class="cdm-tx-kind cdm-tx-kind--claim">Free</span>`;
                 const isSellerView = t.txRole === "sell";
-                const statusText = escapeHtml(transactionStatusLabel(t.status, isSellerView));
+                const donationMoved = Boolean(t.donationMoved);
+                const statusText = escapeHtml(transactionStatusLabel(t.status, isSellerView, donationMoved));
                 const statusClass =
                     String(t.status).toLowerCase() === "completed"
                         ? "cdm-tx-status cdm-tx-status--done"
@@ -9181,7 +9553,7 @@ function renderTransactionsMounted(opts) {
                 const inactivityBadge = isPending
                     ? `<span class="cdm-tx-status">${inactivityDays}d no chat</span>`
                     : "";
-                const headline = transactionStatusHeadline(t.status, t.kind, isSellerView);
+                const headline = transactionStatusHeadline(t.status, t.kind, isSellerView, donationMoved);
                 const rel = formatRelativeTimeShort(t.createdAt);
                 const abs = escapeHtml(formatSavedAt(t.createdAt));
                 const timeLine = rel ? `<span class="cdm-tx-rel">${escapeHtml(rel)}</span> · ${abs}` : abs;
@@ -9192,7 +9564,7 @@ function renderTransactionsMounted(opts) {
                     refBits.length > 0
                         ? `<div class="cdm-tx-ref">${refBits.join(" · ")}</div>`
                         : "";
-                const thumb = transactionThumbEmoji(t.title);
+                const thumbHtml = transactionThumbMediaHtml(t);
                 const moneyBlockHtml = isPurchase ? transactionPurchaseMoneyHtml(t, isSellerView) : transactionClaimMoneyHtml();
                 const payChip = isPurchase ? transactionPaymentChipHtml(t.paymentMethod) : "";
                 const buyerLine =
@@ -9214,6 +9586,7 @@ function renderTransactionsMounted(opts) {
                         ? `<button type="button" class="btn btn-sm cdm-btn-crimson rounded-pill px-3" data-action="tx-open-listing" data-listing-key="${escapeHtml(String(t.listingKey).trim())}">View listing</button>`
                         : "";
                 const txId = t.transactionId != null && Number.isFinite(Number(t.transactionId)) ? Number(t.transactionId) : null;
+                const rowId = String(t.id || "").trim();
                 const msgSellerBtn =
                     !isSellerView &&
                     t.sellerUserId != null &&
@@ -9232,7 +9605,15 @@ function renderTransactionsMounted(opts) {
                     String(t.listingKey).trim()
                         ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="tx-msg-buyer" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey).trim())}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}" data-buyer-id="${escapeAttrForDoubleQuoted(String(t.buyerUserId))}" data-buyer-name="${escapeAttrForDoubleQuoted(String(t.buyerDisplayName || "Buyer"))}">Message buyer</button>`
                         : "";
-                const canShowConfirm = txId != null && String(t.status || "").toLowerCase() !== "completed";
+                const msgFallbackBtn =
+                    !isSellerView && !msgSellerBtn
+                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="nav-messages">Messages</button>`
+                        : "";
+                const msgBuyerFallbackBtn =
+                    isSellerView && !msgBuyerBtn
+                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="nav-messages">Message buyer</button>`
+                        : "";
+                const canShowConfirm = (txId != null || !t.fromServer) && String(t.status || "").toLowerCase() !== "completed";
                 const actorAlreadyConfirmed = isSellerView ? Boolean(t.sellerConfirmed) : Boolean(t.buyerConfirmed);
                 const confirmLabel = isSellerView ? "Mark handoff done" : "Mark pickup done";
                 const confirmBtn = canShowConfirm
@@ -9241,6 +9622,11 @@ function renderTransactionsMounted(opts) {
                             class="btn btn-sm btn-outline-success rounded-pill px-3"
                             data-action="tx-confirm-complete"
                             data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
+                            data-tx-row-id="${escapeAttrForDoubleQuoted(rowId)}"
+                            data-tx-role="${escapeAttrForDoubleQuoted(String(t.txRole || ""))}"
+                            data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey || ""))}"
+                            data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
+                            data-demo="${t.fromServer ? "false" : "true"}"
                             ${actorAlreadyConfirmed ? "disabled aria-disabled=\"true\"" : ""}
                         >${actorAlreadyConfirmed ? "Confirmed by you" : confirmLabel}</button>`
                     : "";
@@ -9252,22 +9638,42 @@ function renderTransactionsMounted(opts) {
                             If this buyer ghosted, move this back to donations so someone else can claim it.
                         </div>`
                         : "";
+                const demoSellerRow = isSellerView && !t.fromServer;
                 const moveDonationBtn =
-                    isSellerView && isPending && inactivityDays >= 15 && txId != null && Number(t.listingId) > 0
+                    isSellerView &&
+                    (demoSellerRow || (isPending && inactivityDays >= 15)) &&
+                    (txId != null || !t.fromServer) &&
+                    (Number(t.listingId) > 0 || !t.fromServer)
                         ? `<button
                             type="button"
                             class="btn btn-sm btn-outline-warning rounded-pill px-3"
                             data-action="tx-move-donation"
                             data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
+                            data-tx-row-id="${escapeAttrForDoubleQuoted(rowId)}"
+                            data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey || ""))}"
                             data-listing-id="${escapeAttrForDoubleQuoted(String(t.listingId))}"
                             data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
+                            data-demo="${t.fromServer ? "false" : "true"}"
                         >Move to donations</button>`
+                        : "";
+                const cancelSaleBtn =
+                    isSellerView && (demoSellerRow || isPending) && (txId != null || !t.fromServer)
+                        ? `<button
+                            type="button"
+                            class="btn btn-sm btn-outline-danger rounded-pill px-3"
+                            data-action="tx-cancel-sale"
+                            data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
+                            data-tx-row-id="${escapeAttrForDoubleQuoted(rowId)}"
+                            data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey || ""))}"
+                            data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
+                            data-demo="${t.fromServer ? "false" : "true"}"
+                        >Cancel sale</button>`
                         : "";
                 return `
             <article class="cdm-tx-card mb-3">
                 <div class="cdm-tx-card-statusline">${headline}</div>
                 <div class="d-flex gap-3 mt-3">
-                    <div class="cdm-tx-thumb" aria-hidden="true">${thumb}</div>
+                    <div class="cdm-tx-thumb" aria-hidden="true">${thumbHtml}</div>
                     <div class="flex-grow-1 min-w-0">
                         <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-1">
                             <h2 class="cdm-tx-card-title h6 mb-0">${escapeHtml(t.title)}</h2>
@@ -9285,9 +9691,12 @@ function renderTransactionsMounted(opts) {
                 <div class="cdm-tx-actions d-flex flex-wrap gap-2 mt-3 pt-3">
                     ${listingBtn}
                     ${confirmBtn}
+                    ${cancelSaleBtn}
                     ${moveDonationBtn}
                     ${msgSellerBtn}
                     ${msgBuyerBtn}
+                    ${msgFallbackBtn}
+                    ${msgBuyerFallbackBtn}
                 </div>
             </article>
         `;
@@ -9465,6 +9874,7 @@ function renderMessages() {
                             <h1 class="h3 cdm-title mb-1">Messages</h1>
                             <p class="cdm-muted small mb-0">Current and past conversations with buyers and sellers.</p>
                         </div>
+                        <button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="transactions">Back to transactions</button>
                     </div>
                     <div class="row g-3">
                         <div class="col-12 col-lg-4">
