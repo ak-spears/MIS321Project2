@@ -90,4 +90,78 @@ public sealed class TransactionsController : ControllerBase
         // Explicit 201 + body so clients always receive transactionId (CreatedAtAction can omit body in some setups).
         return StatusCode(StatusCodes.Status201Created, row);
     }
+
+    /// <summary>
+    /// Buyer or seller confirms handoff done. Marks transaction completed once both sides confirm.
+    /// </summary>
+    [HttpPost("{transactionId:int}/confirm")]
+    [ProducesResponseType(typeof(TransactionListItemDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<TransactionListItemDto>> ConfirmCompletion(
+        [FromRoute] int transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (transactionId <= 0)
+        {
+            return NotFound();
+        }
+
+        var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        {
+            return Unauthorized();
+        }
+
+        var result = await _transactions.ConfirmCompletionAsync(transactionId, userId, cancellationToken);
+        return result.Outcome switch
+        {
+            TransactionRepository.ConfirmCompletionOutcome.NotFound => NotFound("Transaction not found."),
+            TransactionRepository.ConfirmCompletionOutcome.Forbidden => Forbid(),
+            TransactionRepository.ConfirmCompletionOutcome.Conflict => Conflict("This transaction can’t be confirmed in its current state."),
+            _ when result.Row is not null => Ok(result.Row),
+            _ => StatusCode(StatusCodes.Status500InternalServerError, "Could not confirm transaction."),
+        };
+    }
+
+    /// <summary>
+    /// Seller-only: after prolonged inactivity, cancel the stale sale and relist the item as a donation (price 0, active).
+    /// </summary>
+    [HttpPost("{transactionId:int}/move-to-donations")]
+    [ProducesResponseType(typeof(MoveTransactionToDonationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<MoveTransactionToDonationResponse>> MoveToDonations(
+        [FromRoute] int transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (transactionId <= 0)
+        {
+            return NotFound();
+        }
+
+        var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        {
+            return Unauthorized();
+        }
+
+        var result = await _transactions.MoveStaleSaleToDonationAsync(transactionId, userId, 15, cancellationToken);
+        return result.Outcome switch
+        {
+            TransactionRepository.MoveToDonationOutcome.NotFound => NotFound("Transaction not found."),
+            TransactionRepository.MoveToDonationOutcome.Forbidden => Forbid(),
+            TransactionRepository.MoveToDonationOutcome.Conflict => Conflict("This sale is not eligible to move yet (must be pending and inactive for 15+ days)."),
+            _ => Ok(new MoveTransactionToDonationResponse
+            {
+                TransactionId = result.TransactionId,
+                ListingId = result.ListingId,
+                Status = "cancelled",
+            }),
+        };
+    }
 }

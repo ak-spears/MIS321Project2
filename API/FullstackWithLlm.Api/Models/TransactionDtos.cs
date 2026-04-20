@@ -37,4 +37,17 @@ public sealed class TransactionListItemDto
 
     /// <summary>Seller display name on buyer&apos;s transaction rows.</summary>
     public string? SellerDisplayName { get; init; }
+
+    /// <summary>Buyer has confirmed the handoff/pickup is done.</summary>
+    public bool BuyerConfirmed { get; init; }
+
+    /// <summary>Seller has confirmed the handoff/pickup is done.</summary>
+    public bool SellerConfirmed { get; init; }
+}
+
+public sealed class MoveTransactionToDonationResponse
+{
+    public int TransactionId { get; init; }
+    public int ListingId { get; init; }
+    public string Status { get; init; } = "cancelled";
 }

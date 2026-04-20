@@ -9,6 +9,35 @@ public sealed class TransactionRepository
 
     private readonly string _connectionString;
 
+    public enum ConfirmCompletionOutcome
+    {
+        Ok,
+        NotFound,
+        Forbidden,
+        Conflict,
+    }
+
+    public enum MoveToDonationOutcome
+    {
+        Ok,
+        NotFound,
+        Forbidden,
+        Conflict,
+    }
+
+    public sealed class ConfirmCompletionResult
+    {
+        public ConfirmCompletionOutcome Outcome { get; init; }
+        public TransactionListItemDto? Row { get; init; }
+    }
+
+    public sealed class MoveToDonationResult
+    {
+        public MoveToDonationOutcome Outcome { get; init; }
+        public int ListingId { get; init; }
+        public int TransactionId { get; init; }
+    }
+
     public TransactionRepository(IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("DefaultConnection");
@@ -48,6 +77,8 @@ public sealed class TransactionRepository
                 t.status,
                 t.created_at,
                 t.seller_id,
+                t.buyer_confirmed_at,
+                t.seller_confirmed_at,
                 COALESCE(su.display_name, 'Seller') AS seller_display_name
             FROM transactions t
             LEFT JOIN listings l ON l.listing_id = t.listing_id
@@ -79,6 +110,8 @@ public sealed class TransactionRepository
                 CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
                 SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
                 SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
+                BuyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at")),
+                SellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at")),
             });
         }
 
@@ -113,6 +146,8 @@ public sealed class TransactionRepository
                 t.created_at,
                 t.seller_id,
                 t.buyer_id,
+                t.buyer_confirmed_at,
+                t.seller_confirmed_at,
                 COALESCE(b.display_name, '(buyer)') AS buyer_display_name
             FROM transactions t
             LEFT JOIN listings l ON l.listing_id = t.listing_id
@@ -145,6 +180,8 @@ public sealed class TransactionRepository
                 SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
                 BuyerId = reader.GetInt32(reader.GetOrdinal("buyer_id")),
                 BuyerDisplayName = reader.GetString(reader.GetOrdinal("buyer_display_name")),
+                BuyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at")),
+                SellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at")),
             });
         }
 
@@ -289,6 +326,285 @@ public sealed class TransactionRepository
                 CreatedAt = createdAtRow,
                 SellerId = sellerId,
                 BuyerId = buyerId,
+                BuyerConfirmed = false,
+                SellerConfirmed = false,
+            };
+        }
+        catch
+        {
+            await dbTx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<ConfirmCompletionResult> ConfirmCompletionAsync(
+        int transactionId,
+        int actorUserId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var dbTx = await conn.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            const string selectSql = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.buyer_id,
+                    t.seller_id,
+                    t.amount,
+                    t.platform_fee,
+                    t.payment_method,
+                    t.status,
+                    t.created_at,
+                    t.buyer_confirmed_at,
+                    t.seller_confirmed_at,
+                    COALESCE(l.title, '(listing unavailable)') AS title,
+                    COALESCE(bu.display_name, '(buyer)') AS buyer_display_name,
+                    COALESCE(su.display_name, 'Seller') AS seller_display_name
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                LEFT JOIN users bu ON bu.user_id = t.buyer_id
+                LEFT JOIN users su ON su.user_id = t.seller_id
+                WHERE t.transaction_id = @tid
+                FOR UPDATE;
+                """;
+
+            int listingId;
+            int buyerId;
+            int sellerId;
+            decimal amount;
+            decimal platformFee;
+            string paymentMethod;
+            string status;
+            DateTime createdAt;
+            bool buyerConfirmed;
+            bool sellerConfirmed;
+            string title;
+            string buyerDisplayName;
+            string sellerDisplayName;
+
+            await using (var selectCmd = new MySqlCommand(selectSql, conn, dbTx))
+            {
+                selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new ConfirmCompletionResult { Outcome = ConfirmCompletionOutcome.NotFound };
+                }
+
+                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                buyerId = reader.GetInt32(reader.GetOrdinal("buyer_id"));
+                sellerId = reader.GetInt32(reader.GetOrdinal("seller_id"));
+                amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                status = reader.GetString(reader.GetOrdinal("status"));
+                createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                buyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at"));
+                sellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at"));
+                title = reader.GetString(reader.GetOrdinal("title"));
+                buyerDisplayName = reader.GetString(reader.GetOrdinal("buyer_display_name"));
+                sellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name"));
+                await reader.CloseAsync();
+            }
+
+            if (actorUserId != buyerId && actorUserId != sellerId)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new ConfirmCompletionResult { Outcome = ConfirmCompletionOutcome.Forbidden };
+            }
+
+            if (string.Equals(status, "cancelled", StringComparison.OrdinalIgnoreCase))
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new ConfirmCompletionResult { Outcome = ConfirmCompletionOutcome.Conflict };
+            }
+
+            if (actorUserId == buyerId && !buyerConfirmed)
+            {
+                await using var updateBuyer = new MySqlCommand(
+                    "UPDATE transactions SET buyer_confirmed_at = UTC_TIMESTAMP() WHERE transaction_id = @tid;",
+                    conn,
+                    dbTx);
+                updateBuyer.Parameters.AddWithValue("@tid", transactionId);
+                await updateBuyer.ExecuteNonQueryAsync(cancellationToken);
+                buyerConfirmed = true;
+            }
+
+            if (actorUserId == sellerId && !sellerConfirmed)
+            {
+                await using var updateSeller = new MySqlCommand(
+                    "UPDATE transactions SET seller_confirmed_at = UTC_TIMESTAMP() WHERE transaction_id = @tid;",
+                    conn,
+                    dbTx);
+                updateSeller.Parameters.AddWithValue("@tid", transactionId);
+                await updateSeller.ExecuteNonQueryAsync(cancellationToken);
+                sellerConfirmed = true;
+            }
+
+            if (buyerConfirmed && sellerConfirmed && !string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                await using var updateStatus = new MySqlCommand(
+                    "UPDATE transactions SET status = 'completed' WHERE transaction_id = @tid;",
+                    conn,
+                    dbTx);
+                updateStatus.Parameters.AddWithValue("@tid", transactionId);
+                await updateStatus.ExecuteNonQueryAsync(cancellationToken);
+                status = "completed";
+            }
+
+            await dbTx.CommitAsync(cancellationToken);
+
+            return new ConfirmCompletionResult
+            {
+                Outcome = ConfirmCompletionOutcome.Ok,
+                Row = new TransactionListItemDto
+                {
+                    TransactionId = transactionId,
+                    ListingId = listingId,
+                    Title = title,
+                    Amount = amount,
+                    PlatformFee = platformFee,
+                    PaymentMethod = paymentMethod,
+                    Status = status,
+                    CreatedAt = createdAt,
+                    BuyerId = buyerId,
+                    BuyerDisplayName = buyerDisplayName,
+                    SellerId = sellerId,
+                    SellerDisplayName = sellerDisplayName,
+                    BuyerConfirmed = buyerConfirmed,
+                    SellerConfirmed = sellerConfirmed,
+                },
+            };
+        }
+        catch
+        {
+            await dbTx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<MoveToDonationResult> MoveStaleSaleToDonationAsync(
+        int transactionId,
+        int actorUserId,
+        int minInactiveDays = 15,
+        CancellationToken cancellationToken = default)
+    {
+        if (minInactiveDays < 1)
+        {
+            minInactiveDays = 15;
+        }
+
+        await using var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var dbTx = await conn.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            const string selectSql = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.seller_id,
+                    t.status,
+                    t.created_at,
+                    t.buyer_confirmed_at,
+                    t.seller_confirmed_at
+                FROM transactions t
+                WHERE t.transaction_id = @tid
+                FOR UPDATE;
+                """;
+
+            int listingId;
+            int sellerId;
+            string status;
+            DateTime createdAt;
+            bool buyerConfirmed;
+            bool sellerConfirmed;
+
+            await using (var selectCmd = new MySqlCommand(selectSql, conn, dbTx))
+            {
+                selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new MoveToDonationResult { Outcome = MoveToDonationOutcome.NotFound };
+                }
+
+                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                sellerId = reader.GetInt32(reader.GetOrdinal("seller_id"));
+                status = reader.GetString(reader.GetOrdinal("status"));
+                createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                buyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at"));
+                sellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at"));
+                await reader.CloseAsync();
+            }
+
+            if (actorUserId != sellerId)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new MoveToDonationResult { Outcome = MoveToDonationOutcome.Forbidden };
+            }
+
+            if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase) || buyerConfirmed || sellerConfirmed)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new MoveToDonationResult { Outcome = MoveToDonationOutcome.Conflict };
+            }
+
+            var inactiveDays = (DateTime.UtcNow - createdAt.ToUniversalTime()).TotalDays;
+            if (inactiveDays < minInactiveDays)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return new MoveToDonationResult { Outcome = MoveToDonationOutcome.Conflict };
+            }
+
+            await using (var cancelTxCmd = new MySqlCommand(
+                             "UPDATE transactions SET status = 'cancelled' WHERE transaction_id = @tid AND status = 'pending';",
+                             conn,
+                             dbTx))
+            {
+                cancelTxCmd.Parameters.AddWithValue("@tid", transactionId);
+                var n = await cancelTxCmd.ExecuteNonQueryAsync(cancellationToken);
+                if (n != 1)
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new MoveToDonationResult { Outcome = MoveToDonationOutcome.Conflict };
+                }
+            }
+
+            await using (var updateListingCmd = new MySqlCommand(
+                             """
+                             UPDATE listings
+                             SET price = 0,
+                                 or_best_offer = 0,
+                                 status = 'active'
+                             WHERE listing_id = @lid AND seller_id = @sid AND status <> 'removed';
+                             """,
+                             conn,
+                             dbTx))
+            {
+                updateListingCmd.Parameters.AddWithValue("@lid", listingId);
+                updateListingCmd.Parameters.AddWithValue("@sid", sellerId);
+                var n = await updateListingCmd.ExecuteNonQueryAsync(cancellationToken);
+                if (n != 1)
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return new MoveToDonationResult { Outcome = MoveToDonationOutcome.Conflict };
+                }
+            }
+
+            await dbTx.CommitAsync(cancellationToken);
+            return new MoveToDonationResult
+            {
+                Outcome = MoveToDonationOutcome.Ok,
+                ListingId = listingId,
+                TransactionId = transactionId,
             };
         }
         catch

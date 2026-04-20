@@ -237,6 +237,8 @@ const state = {
     txRole: /** @type {'buy' | 'sell'} */ ("buy"),
     /** Transactions page: all vs needs-action filter. */
     txFilter: /** @type {'all' | 'action'} */ ("all"),
+    /** Runtime mode: live API data or demo fallback when backend is unavailable. */
+    appMode: /** @type {'live' | 'demo-fallback'} */ ("live"),
 };
 
 /**
@@ -461,9 +463,12 @@ function mapServerTransactionToRow(d, txRole = "buy") {
     const sname = d.sellerDisplayName ?? d.SellerDisplayName;
     const sellerDisplayName =
         sname != null && String(sname).trim() ? String(sname).trim() : sellerUserId ? `User #${sellerUserId}` : "Seller";
+    const buyerConfirmed = Boolean(d.buyerConfirmed ?? d.BuyerConfirmed);
+    const sellerConfirmed = Boolean(d.sellerConfirmed ?? d.SellerConfirmed);
     return {
         id: `srv-${txRole}-${tid}`,
         fromServer: true,
+        transactionId: tid != null && Number.isFinite(Number(tid)) ? Number(tid) : null,
         createdAt: createdAt || new Date().toISOString(),
         title: d.title,
         listingKey: `db:${lid}`,
@@ -478,6 +483,8 @@ function mapServerTransactionToRow(d, txRole = "buy") {
         buyerDisplayName: bname != null && String(bname).trim() ? String(bname).trim() : null,
         sellerUserId,
         sellerDisplayName,
+        buyerConfirmed,
+        sellerConfirmed,
         txRole,
     };
 }
@@ -580,6 +587,43 @@ function transactionPaymentChipHtml(pm) {
     return `<span class="${cls}">${escapeHtml(label)}</span>`;
 }
 
+function transactionInactivityDaysForRow(t) {
+    const createdAtMs = new Date(String(t?.createdAt || "")).getTime();
+    const listingKey = String(t?.listingKey || "").trim();
+    let lastActivityMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
+    if (listingKey) {
+        const rows = getStoredConversations();
+        const myId = parseJwtSub(state.token);
+        const matches = rows.filter((row) => {
+            if (String(row?.listingKey || "").trim() !== listingKey) return false;
+            if (myId == null) return true;
+            return Number(row.buyerUserId) === myId || Number(row.sellerUserId) === myId;
+        });
+        matches.forEach((row) => {
+            const u = new Date(String(row?.updatedAt || "")).getTime();
+            if (Number.isFinite(u)) lastActivityMs = Math.max(lastActivityMs, u);
+        });
+    }
+    const days = Math.floor((Date.now() - lastActivityMs) / 86400000);
+    return Math.max(0, days);
+}
+
+function txConfirmHintHtml(t, isSellerView) {
+    const buyerDone = Boolean(t.buyerConfirmed);
+    const sellerDone = Boolean(t.sellerConfirmed);
+    if (buyerDone && sellerDone) {
+        return `<p class="cdm-tx-footnote mb-0 mt-2">Both sides confirmed. This handoff is locked as completed.</p>`;
+    }
+    if (isSellerView) {
+        return sellerDone
+            ? `<p class="cdm-tx-footnote mb-0 mt-2">You confirmed handoff. Waiting on buyer to mark pickup done.</p>`
+            : `<p class="cdm-tx-footnote mb-0 mt-2">When handoff is done, tap <strong>Mark handoff done</strong>.</p>`;
+    }
+    return buyerDone
+        ? `<p class="cdm-tx-footnote mb-0 mt-2">You confirmed pickup. Waiting on seller to confirm handoff.</p>`
+        : `<p class="cdm-tx-footnote mb-0 mt-2">After pickup, tap <strong>Mark pickup done</strong>.</p>`;
+}
+
 const CDM_CHECKOUT_PAYMENT_PREF_KEY = "cdm_checkout_payment_pref_v1";
 
 function formatRelativeTimeShort(iso) {
@@ -659,6 +703,48 @@ function formatCheckoutPickupUrgencyHtml(ctx) {
     return `<div class="cdm-checkout-urgency alert alert-warning py-2 px-3 small mb-0" role="status">
         Pickup window ends <strong>${escapeHtml(long)}</strong>. Lock in a time with the seller so you don’t miss it.
     </div>`;
+}
+
+/**
+ * Lightweight "pair well with this" suggestions from the live Home feed cache.
+ * Only returns live DB-backed sell listings so checkout can reserve them.
+ * @param {{ key?: string, listingId?: number, title?: string }} ctx
+ * @param {number} limit
+ */
+function getCheckoutComplementaryItems(ctx, limit = 3) {
+    const pool = Array.isArray(state.feedItemsCache) ? state.feedItemsCache : [];
+    if (!pool.length) return [];
+    const primaryTitle = String(ctx?.title || "").toLowerCase();
+    const titleTokens = primaryTitle.split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
+    const primaryId = Number(ctx?.listingId);
+    const primaryKey = String(ctx?.key || "").trim().toLowerCase();
+    const blockedWords = new Set(["the", "for", "and", "with", "from", "you", "your"]);
+    const tokenSet = new Set(titleTokens.filter((t) => !blockedWords.has(t)));
+
+    const scored = pool
+        .filter((item) => item?.listingKind === "sell")
+        .filter((item) => {
+            const key = String(item?.key || "").trim().toLowerCase();
+            if (primaryKey && key === primaryKey) return false;
+            const idFromKey = key.startsWith("db:") ? Number(key.slice(3)) : NaN;
+            if (Number.isFinite(primaryId) && primaryId > 0 && Number.isFinite(idFromKey) && idFromKey === primaryId) return false;
+            const p = Number(item?.priceNum);
+            return Number.isFinite(p) && p > 0;
+        })
+        .map((item) => {
+            const t = String(item?.title || "").toLowerCase();
+            const words = t.split(/[^a-z0-9]+/).filter(Boolean);
+            let score = 0;
+            words.forEach((w) => {
+                if (tokenSet.has(w)) score += 4;
+            });
+            if (item?.categorySlug) score += 2;
+            if (item?.spaceSuitability) score += 1;
+            return { item, score };
+        })
+        .sort((a, b) => b.score - a.score || Number(a.item.priceNum) - Number(b.item.priceNum));
+
+    return scored.slice(0, Math.max(0, limit)).map((x) => x.item);
 }
 
 /**
@@ -906,6 +992,90 @@ const SAMPLE_HOME_FEED = [
     },
 ];
 
+function buildDemoTransactionRows() {
+    const paid = SAMPLE_HOME_FEED.filter((x) => Number(x.priceNum) > 0).slice(0, 3);
+    const now = Date.now();
+    const mkIsoDaysAgo = (days) => new Date(now - days * 86400000).toISOString();
+    /** @type {any[]} */
+    const out = [];
+    if (paid[0]) {
+        const p = Number(paid[0].priceNum) || 35;
+        out.push({
+            id: "demo-buy-1",
+            fromServer: false,
+            createdAt: mkIsoDaysAgo(2),
+            title: paid[0].title,
+            listingKey: `sample:${paid[0].id}`,
+            listingId: null,
+            kind: "purchase",
+            listPrice: p,
+            platformFee: platformFeeFromSale(p),
+            sellerNet: sellerNetFromSale(p),
+            status: "awaiting_chat",
+            paymentMethod: "cash",
+            buyerUserId: null,
+            buyerDisplayName: null,
+            sellerUserId: 9001,
+            sellerDisplayName: "Campus Seller",
+            txRole: "buy",
+            transactionId: null,
+            buyerConfirmed: false,
+            sellerConfirmed: false,
+        });
+    }
+    if (paid[1]) {
+        const p = Number(paid[1].priceNum) || 60;
+        out.push({
+            id: "demo-buy-2",
+            fromServer: false,
+            createdAt: mkIsoDaysAgo(8),
+            title: paid[1].title,
+            listingKey: `sample:${paid[1].id}`,
+            listingId: null,
+            kind: "purchase",
+            listPrice: p,
+            platformFee: platformFeeFromSale(p),
+            sellerNet: sellerNetFromSale(p),
+            status: "completed",
+            paymentMethod: "card",
+            buyerUserId: null,
+            buyerDisplayName: null,
+            sellerUserId: 9002,
+            sellerDisplayName: "Dorm Deals",
+            txRole: "buy",
+            transactionId: null,
+            buyerConfirmed: true,
+            sellerConfirmed: true,
+        });
+    }
+    if (paid[2]) {
+        const p = Number(paid[2].priceNum) || 45;
+        out.push({
+            id: "demo-sell-1",
+            fromServer: false,
+            createdAt: mkIsoDaysAgo(5),
+            title: paid[2].title,
+            listingKey: `sample:${paid[2].id}`,
+            listingId: null,
+            kind: "purchase",
+            listPrice: p,
+            platformFee: platformFeeFromSale(p),
+            sellerNet: sellerNetFromSale(p),
+            status: "awaiting_chat",
+            paymentMethod: "cash",
+            buyerUserId: 8123,
+            buyerDisplayName: "Demo Buyer",
+            sellerUserId: parseJwtSub(state.token),
+            sellerDisplayName: state.authEmail || "You",
+            txRole: "sell",
+            transactionId: null,
+            buyerConfirmed: false,
+            sellerConfirmed: false,
+        });
+    }
+    return out;
+}
+
 /** 1×1 transparent GIF — feed cards set real src via JS to avoid browser limits on huge attributes in innerHTML. */
 const FEED_THUMB_PLACEHOLDER_SRC =
     "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
@@ -1082,11 +1252,13 @@ async function fetchFeedItemsForHome() {
     state.feedMatchScoreByListingId = {};
     let dbCards = [];
     const myId = parseJwtSub(state.token);
+    let apiFeedOk = false;
     try {
         const res = await fetch(`${API_BASE}/api/listings/feed?limit=${HOME_FEED_FETCH_LIMIT}`, {
             headers: { Accept: "application/json", ...feedAuthHeaders() },
         });
         if (res.ok) {
+            apiFeedOk = true;
             const rows = await res.json();
             dbCards = rows
                 .filter((row) => {
@@ -1152,10 +1324,13 @@ async function fetchFeedItemsForHome() {
                     state.feedMatchScoreByListingId[lid] = cardPct;
                     return item;
                 });
+        } else {
+            state.appMode = "demo-fallback";
         }
     } catch {
-        /* optional feed */
+        state.appMode = "demo-fallback";
     }
+    if (apiFeedOk) state.appMode = "live";
 
     const sample = SAMPLE_HOME_FEED.map((x) => {
         const priceNum = Number(x.priceNum);
@@ -1185,9 +1360,8 @@ async function fetchFeedItemsForHome() {
             state.feedThumbSrcByKey[x.key] = x.photoDataUrl;
         });
     };
-    // Logged out: DB rows + demo preview cards. Logged in: MySQL-backed rows only — never sample cards,
-    // so "Buy" always maps to a real listing_id and POST /api/transactions can persist.
-    if (!state.token) {
+    // Logged out: DB rows + demo preview cards. Logged in: MySQL-backed rows only, unless backend is down.
+    if (!state.token || state.appMode === "demo-fallback") {
         fillSampleThumbs();
         return sortHomeFeedItemsByMatchDesc([...dbCards, ...sample]).slice(0, HOME_FEED_DISPLAY_CAP);
     }
@@ -1198,7 +1372,7 @@ async function buildHomeFeedRowsHtml() {
     const items = await fetchFeedItemsForHome();
     state.feedItemsCache = items;
     const filtered = applyFeedFilters(items);
-    if (filtered.length === 0 && state.token) {
+    if (filtered.length === 0 && state.token && state.appMode === "live") {
         return `<div class="col-12"><div class="cdm-card p-4 p-lg-5 text-center">
             <p class="fw-semibold text-dark mb-2">No other students’ listings to show yet</p>
             <p class="cdm-muted small mb-3 mb-lg-4">While you’re signed in, only <strong>real posts from the database</strong> appear here — so checkout always updates MySQL. Ask a teammate to post, or switch accounts to see your own tests.</p>
@@ -1818,6 +1992,25 @@ function ensureConversationForSellerToBuyer(payload) {
 }
 
 /**
+ * Reuse an existing thread by listing when transaction card metadata is incomplete.
+ * @param {string} listingKey
+ * @returns {MessageConversation | null}
+ */
+function findConversationForCurrentUserByListingKey(listingKey) {
+    const me = parseJwtSub(state.token);
+    const key = String(listingKey || "").trim();
+    if (me == null || !key) return null;
+    const rows = getStoredConversations()
+        .filter(
+            (row) =>
+                String(row.listingKey || "").trim() === key &&
+                (Number(row.buyerUserId) === me || Number(row.sellerUserId) === me),
+        )
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return rows[0] || null;
+}
+
+/**
  * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
  */
 function openMessagesForListing(payload) {
@@ -1826,9 +2019,18 @@ function openMessagesForListing(payload) {
         navigateAuth("login");
         return;
     }
-    const conv = ensureConversationForListing(payload);
+    const sellerId = Number(payload?.sellerUserId);
+    const conv =
+        ensureConversationForListing(payload) ||
+        findConversationForCurrentUserByListingKey(payload?.listingKey || "");
     if (!conv) {
-        alert("Could not open messages for this listing.");
+        state.messagesActiveConversationId = null;
+        navigateMessages();
+        if (!Number.isFinite(sellerId) || sellerId <= 0) {
+            alert("Can’t start this chat yet — seller id is missing on this transaction.");
+            return;
+        }
+        alert("Couldn’t open this chat from Transactions. Try opening Messages from the listing page.");
         return;
     }
     state.messagesActiveConversationId = conv.id;
@@ -1844,9 +2046,18 @@ function openMessagesWithBuyerForListing(payload) {
         navigateAuth("login");
         return;
     }
-    const conv = ensureConversationForSellerToBuyer(payload);
+    const buyerId = Number(payload?.buyerUserId);
+    const conv =
+        ensureConversationForSellerToBuyer(payload) ||
+        findConversationForCurrentUserByListingKey(payload?.listingKey || "");
     if (!conv) {
-        alert("Could not open messages for this buyer.");
+        state.messagesActiveConversationId = null;
+        navigateMessages();
+        if (!Number.isFinite(buyerId) || buyerId <= 0) {
+            alert("Can’t start this chat yet — buyer id is missing on this transaction.");
+            return;
+        }
+        alert("Couldn’t open this chat from Transactions. Try opening Messages from the listing page.");
         return;
     }
     state.messagesActiveConversationId = conv.id;
@@ -2314,6 +2525,104 @@ function wireNav(root) {
             const name = btn.getAttribute("data-buyer-name") ?? "Buyer";
             if (!key || !Number.isFinite(bid) || bid <= 0) return;
             openMessagesWithBuyerForListing({ listingKey: key, listingTitle: title, buyerUserId: bid, buyerLabel: name });
+        });
+    });
+    root.querySelectorAll("[data-action='tx-confirm-complete']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const txId = Number(btn.getAttribute("data-transaction-id"));
+            if (!Number.isFinite(txId) || txId <= 0) return;
+            if (!state.token || isJwtLikelyExpired(state.token)) {
+                clearClientAuthSession();
+                navigateAuth("login");
+                return;
+            }
+            const oldText = btn.textContent;
+            btn.setAttribute("disabled", "true");
+            btn.setAttribute("aria-disabled", "true");
+            btn.textContent = "Saving...";
+            let res;
+            let data;
+            try {
+                ({ res, data } = await apiJson(`/api/transactions/${txId}/confirm`, { method: "POST" }));
+            } catch {
+                alert("Couldn’t confirm right now. Check your connection and try again.");
+                btn.removeAttribute("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.textContent = oldText;
+                return;
+            }
+            if (res.status === 401) {
+                clearClientAuthSession();
+                navigateAuth("login");
+                return;
+            }
+            if (!res.ok) {
+                const msg = parseApiError(data, "Couldn’t save your confirmation.");
+                alert(msg);
+                btn.removeAttribute("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.textContent = oldText;
+                return;
+            }
+            renderTransactions();
+        });
+    });
+    root.querySelectorAll("[data-action='tx-move-donation']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const txId = Number(btn.getAttribute("data-transaction-id"));
+            const title = String(btn.getAttribute("data-listing-title") || "this listing");
+            if (!Number.isFinite(txId) || txId <= 0) return;
+            if (
+                !confirm(
+                    `Move "${title}" to donations?\n\nThis cancels the stale sale transaction and relists the item as a free donation.`,
+                )
+            ) {
+                return;
+            }
+
+            const oldText = btn.textContent;
+            btn.setAttribute("disabled", "true");
+            btn.setAttribute("aria-disabled", "true");
+            btn.textContent = "Moving...";
+
+            let res;
+            let data;
+            try {
+                ({ res, data } = await apiJson(`/api/transactions/${txId}/move-to-donations`, { method: "POST" }));
+            } catch {
+                alert("Couldn’t move this to donations right now. Try again.");
+                btn.removeAttribute("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.textContent = oldText;
+                return;
+            }
+
+            if (res.status === 401) {
+                clearClientAuthSession();
+                navigateAuth("login");
+                return;
+            }
+            if (!res.ok) {
+                const msg = parseApiError(
+                    data,
+                    "Couldn’t move to donations. It may need 15+ days without activity and must still be pending.",
+                );
+                alert(msg);
+                btn.removeAttribute("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.textContent = oldText;
+                return;
+            }
+
+            const listingId = Number(data?.listingId ?? data?.ListingId ?? btn.getAttribute("data-listing-id"));
+            if (!Number.isFinite(listingId) || listingId <= 0) {
+                alert("Moved to donations, but listing id was missing. Open My donations to edit.");
+                navigate("my-donations");
+                return;
+            }
+            state.editingListingId = listingId;
+            state.postEditPrefill = null;
+            navigate("donate-post");
         });
     });
     root.querySelectorAll("[data-action='view-listing']").forEach((btn) => {
@@ -5440,7 +5749,9 @@ async function renderHome() {
                                     <div class="h5 mb-0">Matched feed (preview)</div>
                                     <div class="cdm-muted small">${
                                         state.token
-                                            ? "Signed in: only <strong>live MySQL listings</strong> (no sample cards) — checkout writes to the database."
+                                            ? state.appMode === "demo-fallback"
+                                                ? "Backend unavailable: showing <strong>demo listings</strong> so you can keep presenting the full flow."
+                                                : "Signed in: only <strong>live MySQL listings</strong> (no sample cards) — checkout writes to the database."
                                             : "Logged out: sample cards are UI previews only. Sign in and use real listings for SQL-backed checkout."
                                     } Filters apply instantly on this page.</div>
                                 </div>
@@ -7929,6 +8240,63 @@ function showCheckoutError(root, messageHtml) {
 function wireCheckoutPage(root) {
     wireCheckoutPaymentUi(root);
 
+    const selectedBundleKeys = new Set();
+    const addButtons = Array.from(root.querySelectorAll("[data-action='checkout-toggle-bundle']"));
+
+    const updateBundleUi = () => {
+        /** @type {Array<{ key: string, title: string, price: number, listingId: number }>} */
+        const selected = [];
+        addButtons.forEach((btn) => {
+            const key = String(btn.getAttribute("data-listing-key") || "").trim();
+            const listingId = Number(btn.getAttribute("data-listing-id"));
+            const title = String(btn.getAttribute("data-title") || "Item");
+            const price = Number(btn.getAttribute("data-price"));
+            const isSelected = key && selectedBundleKeys.has(key);
+            btn.textContent = isSelected ? "Added" : "Add to checkout";
+            btn.classList.toggle("btn-dark", isSelected);
+            btn.classList.toggle("btn-outline-dark", !isSelected);
+            btn.setAttribute("aria-pressed", isSelected ? "true" : "false");
+            if (isSelected && Number.isFinite(listingId) && listingId > 0 && Number.isFinite(price) && price > 0) {
+                selected.push({ key, title, price, listingId });
+            }
+        });
+
+        const countEl = root.querySelector("#checkout-bundle-count");
+        if (countEl) countEl.textContent = String(selected.length);
+        const itemsEl = root.querySelector("#checkout-bundle-items");
+        if (itemsEl) {
+            itemsEl.innerHTML = selected.length
+                ? selected.map((x) => `<div class="small text-muted">+ ${escapeHtml(x.title)} · ${formatUsd(x.price)}</div>`).join("")
+                : `<div class="small text-muted">No add-ons selected yet.</div>`;
+        }
+        const addOnTotal = selected.reduce((s, x) => s + x.price, 0);
+        const baseRaw = Number(root.querySelector("#checkout-base-total")?.getAttribute("data-base-total"));
+        const base = Number.isFinite(baseRaw) ? baseRaw : 0;
+        const totalEl = root.querySelector("#checkout-total-pay");
+        if (totalEl) totalEl.textContent = formatUsd(base + addOnTotal);
+        const confirmBtn = root.querySelector("#checkout-confirm-btn");
+        if (confirmBtn) {
+            const isSale = base > 0;
+            confirmBtn.textContent =
+                selected.length > 0
+                    ? `Confirm ${selected.length + 1} reservations`
+                    : isSale
+                      ? "Confirm purchase"
+                      : "Claim item";
+        }
+    };
+
+    addButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = String(btn.getAttribute("data-listing-key") || "").trim();
+            if (!key) return;
+            if (selectedBundleKeys.has(key)) selectedBundleKeys.delete(key);
+            else selectedBundleKeys.add(key);
+            updateBundleUi();
+        });
+    });
+    updateBundleUi();
+
     root.querySelector("#checkout-confirm-btn")?.addEventListener("click", async () => {
         const ctx = state.checkoutContext;
         if (!ctx) return;
@@ -7946,6 +8314,11 @@ function wireCheckoutPage(root) {
             const el = root.querySelector('input[name="checkout-payment"]:checked');
             return el?.getAttribute("value") === "card" ? "card" : "cash";
         };
+        const getSelectedBundleListingIds = () =>
+            addButtons
+                .filter((btn) => selectedBundleKeys.has(String(btn.getAttribute("data-listing-key") || "").trim()))
+                .map((btn) => Number(btn.getAttribute("data-listing-id")))
+                .filter((id) => Number.isFinite(id) && id > 0);
 
         const btn = root.querySelector("#checkout-confirm-btn");
         const label = isSale ? "Confirm purchase" : "Claim item";
@@ -7956,71 +8329,74 @@ function wireCheckoutPage(root) {
         let savedListingIdForTx = null;
         /** @type {unknown} */
         let postCheckoutPayload = null;
+        /** @type {number[]} */
+        let successfulListingIds = [];
+        /** @type {string[]} */
+        let failedReasons = [];
         if (useApi) {
             if (btn) {
                 btn.disabled = true;
                 btn.textContent = "Confirming…";
             }
             const paymentMethod = getSelectedPaymentMethod();
-            let res;
-            let data;
-            try {
-                ({ res, data } = await apiJson("/api/transactions", {
-                    method: "POST",
-                    body: JSON.stringify({ listingId: listingIdNum, paymentMethod }),
-                }));
-            } catch {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = label;
+            const listingIds = Array.from(new Set([listingIdNum, ...getSelectedBundleListingIds()]));
+            for (const targetListingId of listingIds) {
+                let res;
+                let data;
+                try {
+                    ({ res, data } = await apiJson("/api/transactions", {
+                        method: "POST",
+                        body: JSON.stringify({ listingId: targetListingId, paymentMethod }),
+                    }));
+                } catch {
+                    failedReasons.push(formatAuthNetworkError());
+                    continue;
                 }
-                showCheckoutError(root, escapeHtml(formatAuthNetworkError()));
-                return;
+                if (res.status === 401) {
+                    setStoredToken(null);
+                    state.token = null;
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = label;
+                    }
+                    showCheckoutError(root, escapeHtml("Session expired — sign in again to complete checkout."));
+                    navigateAuth("login");
+                    return;
+                }
+                if (!res.ok) {
+                    failedReasons.push(
+                        parseApiError(
+                            data,
+                            res.status === 409 ? "One suggested item just sold out." : "Could not reserve one of the selected items.",
+                        ),
+                    );
+                    continue;
+                }
+                if (savedTransactionId == null) {
+                    savedTransactionId = parseTransactionIdFromApiPayload(data);
+                    savedListingIdForTx = targetListingId;
+                    postCheckoutPayload = data;
+                }
+                successfulListingIds.push(targetListingId);
+                serverBacked = true;
             }
             if (btn) {
                 btn.disabled = false;
                 btn.textContent = label;
             }
-            if (!res.ok) {
-                if (res.status === 401) {
-                    setStoredToken(null);
-                    state.token = null;
-                    showCheckoutError(root, escapeHtml("Session expired — sign in again to complete checkout."));
-                    navigateAuth("login");
-                    return;
-                }
-                const msg = parseApiError(
-                    data,
-                    res.status === 409
-                        ? "That listing is no longer available."
-                        : "Could not complete checkout.",
-                );
-                showCheckoutError(root, escapeHtml(msg));
+            if (!successfulListingIds.length) {
+                showCheckoutError(root, escapeHtml(failedReasons[0] || "Could not complete checkout."));
                 return;
             }
-            serverBacked = true;
-            savedListingIdForTx = listingIdNum;
-            postCheckoutPayload = data;
-            savedTransactionId = parseTransactionIdFromApiPayload(data);
             /** @type {{ res: Response; data: unknown } | null} */
             let minePoll = null;
             if (savedTransactionId == null && state.token && !isJwtLikelyExpired(state.token)) {
                 minePoll = await apiJson("/api/transactions/mine?limit=48");
                 if (minePoll.res.ok && Array.isArray(minePoll.data)) {
                     const match = minePoll.data.find((t) => Number(t.listingId ?? t.ListingId) === listingIdNum);
-                    if (match) {
-                        savedTransactionId = parseTransactionIdFromApiPayload(match);
-                    } else if (minePoll.data.length > 0) {
-                        savedTransactionId = parseTransactionIdFromApiPayload(minePoll.data[0]);
-                    }
+                    if (match) savedTransactionId = parseTransactionIdFromApiPayload(match);
+                    else if (minePoll.data.length > 0) savedTransactionId = parseTransactionIdFromApiPayload(minePoll.data[0]);
                 }
-            }
-            if (savedTransactionId == null && minePoll?.res?.ok && Array.isArray(minePoll.data) && minePoll.data.length === 0) {
-                showCheckoutError(
-                    root,
-                    `${escapeHtml("Checkout may have saved, but nothing shows on your account yet.")} <span class="d-block mt-1"><strong>Common causes:</strong> API pointed at a different database than you’re checking, wrong signed-in user, or a preview listing.</span>`,
-                );
-                return;
             }
             try {
                 localStorage.setItem(CDM_CHECKOUT_PAYMENT_PREF_KEY, paymentMethod);
@@ -8071,6 +8447,8 @@ function wireCheckoutPage(root) {
             listingKey: listingKeyForMsg,
             sellerUserId: sellerUid,
             sellerDisplayName: String(ctx.sellerDisplayName || "Seller"),
+            bundleReservedCount: successfulListingIds.length,
+            bundleFailedCount: failedReasons.length,
         };
         state.checkoutContext = null;
         state.view = "checkout-success";
@@ -8104,6 +8482,7 @@ function renderCheckout() {
         : "Confirm your free claim so the seller knows you’re coming. Same respect as a paid pickup.";
 
     const pickupUrgencyHtml = formatCheckoutPickupUrgencyHtml(ctx);
+    const complementary = isSale ? getCheckoutComplementaryItems(ctx, 3) : [];
 
     const missionWhyCollapsible = `
         <div class="mb-3">
@@ -8263,6 +8642,7 @@ function renderCheckout() {
     const platformFee = isSale ? platformFeeFromSale(ctx.price) : 0;
     const moneyBlockHtml = isSale
         ? `<div class="cdm-checkout-money" role="group" aria-label="Price breakdown">
+            <span id="checkout-base-total" data-base-total="${escapeHtml(String(Number(ctx.price) || 0))}" class="d-none"></span>
             <div class="cdm-checkout-money-row">
                 <span class="cdm-checkout-money-label">List price</span>
                 <span class="cdm-checkout-money-amt">${formatUsd(ctx.price)}</span>
@@ -8274,7 +8654,7 @@ function renderCheckout() {
             <p class="cdm-checkout-money-note small mb-2">This fee is not added to your total — you pay the list price to the seller.</p>
             <div class="cdm-checkout-money-row cdm-checkout-money-row--total">
                 <span class="cdm-checkout-money-label">Total you pay</span>
-                <span class="cdm-checkout-money-amt">${formatUsd(ctx.price)}</span>
+                <span class="cdm-checkout-money-amt" id="checkout-total-pay">${formatUsd(ctx.price)}</span>
             </div>
         </div>`
         : `<div class="cdm-checkout-money cdm-checkout-money--free" role="group" aria-label="Price">
@@ -8288,6 +8668,59 @@ function renderCheckout() {
     const summaryTotalLine = isSale
         ? `<p class="cdm-checkout-footnote mb-0 mt-2">Tax isn’t shown in this preview. Payment is direct to seller (see note above).</p>`
         : `<p class="cdm-checkout-footnote mb-0 mt-2">Say thanks, show up on time.</p>`;
+
+    const bundleSummaryHtml = isSale
+        ? `<div class="rounded-3 border bg-light p-2 mb-3">
+            <div class="small fw-semibold">Checkout bundle · <span id="checkout-bundle-count">0</span> add-ons</div>
+            <div id="checkout-bundle-items" class="mt-1"></div>
+            <p class="small text-muted mb-0 mt-1">You’ll reserve selected items now and pay each seller directly at pickup.</p>
+        </div>`
+        : "";
+
+    const complementaryPanel = complementary.length
+        ? `<div class="cdm-checkout-panel">
+            <h3>Pair well with this</h3>
+            <p class="small text-muted mb-3">Popular add-ons nearby. Tap to add to this checkout.</p>
+            <div class="d-flex flex-column gap-2">
+                ${complementary
+                    .map((item) => {
+                        const key = String(item?.key || "").trim();
+                        const lid = key.startsWith("db:") ? Number(key.slice(3)) : NaN;
+                        const price = Number(item?.priceNum);
+                        if (!key || !Number.isFinite(lid) || lid <= 0 || !Number.isFinite(price) || price <= 0) return "";
+                        const img =
+                            item?.photoDataUrl && String(item.photoDataUrl).trim()
+                                ? String(item.photoDataUrl).trim()
+                                : state.feedThumbSrcByKey && state.feedThumbSrcByKey[key]
+                                  ? String(state.feedThumbSrcByKey[key]).trim()
+                                  : "";
+                        const thumbMini = img
+                            ? `<img src="${escapeHtml(img)}" alt="${escapeHtml(String(item.title || "Item"))}" style="width:52px;height:52px;object-fit:cover;border-radius:10px;border:1px solid rgba(0,0,0,0.08)" />`
+                            : `<div class="d-flex align-items-center justify-content-center bg-light text-muted small" style="width:52px;height:52px;border-radius:10px;border:1px solid rgba(0,0,0,0.08)">No photo</div>`;
+                        return `<div class="d-flex align-items-center justify-content-between gap-2 border rounded-3 p-2">
+                            <div class="d-flex align-items-center gap-2 min-w-0">
+                                ${thumbMini}
+                                <div class="min-w-0">
+                                    <div class="fw-medium text-truncate">${escapeHtml(String(item.title || "Item"))}</div>
+                                    <div class="small text-muted">${formatUsd(price)}</div>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-outline-dark rounded-pill"
+                                data-action="checkout-toggle-bundle"
+                                data-listing-key="${escapeAttrForDoubleQuoted(key)}"
+                                data-listing-id="${escapeAttrForDoubleQuoted(String(lid))}"
+                                data-price="${escapeAttrForDoubleQuoted(String(price))}"
+                                data-title="${escapeAttrForDoubleQuoted(String(item.title || "Item"))}"
+                                aria-pressed="false"
+                            >Add to checkout</button>
+                        </div>`;
+                    })
+                    .join("")}
+            </div>
+        </div>`
+        : "";
 
     const shell = el(`
         <div class="cdm-shell cdm-checkout-shell">
@@ -8358,6 +8791,7 @@ function renderCheckout() {
                                 ${moneyBlockHtml}
                                 <hr class="cdm-checkout-line" />
                                 ${paymentChoiceHtml}
+                                ${bundleSummaryHtml}
                                 ${summaryTotalLine}
                                 <div id="checkout-error-slot" class="checkout-error-slot"></div>
                                 <button type="button" class="btn cdm-btn-crimson cdm-checkout-cta" id="checkout-confirm-btn">
@@ -8387,6 +8821,7 @@ function renderCheckout() {
                             </div>
                         </div>
                         <div class="col-12 col-lg-7 order-2 order-lg-1">
+                            ${complementaryPanel}
                             ${saleDetailPanels}
                             ${storagePanel}
                             ${chatPanel}
@@ -8429,6 +8864,14 @@ function renderCheckoutSuccess() {
         s.isSale && s.paymentMethod
             ? `<p class="small mb-3 text-start mx-auto" style="max-width: 22rem"><strong>Recorded:</strong> ${escapeHtml(pmLabel)} — confirm details with <strong>${escapeHtml(String(s.sellerDisplayName || "the seller"))}</strong> in Messages.</p>`
             : `<p class="small mb-3 text-start mx-auto" style="max-width: 22rem">Next: message <strong>${escapeHtml(String(s.sellerDisplayName || "the seller"))}</strong> to schedule pickup.</p>`;
+    const bundleNote =
+        Number(s.bundleReservedCount || 0) > 1
+            ? `<p class="small mb-3 text-start mx-auto" style="max-width: 22rem"><strong>${escapeHtml(String(s.bundleReservedCount))} items reserved.</strong> You can coordinate each pickup in Messages.</p>`
+            : "";
+    const partialNote =
+        Number(s.bundleFailedCount || 0) > 0
+            ? `<p class="small text-warning text-start mx-auto mb-3" style="max-width: 22rem">Heads up: ${escapeHtml(String(s.bundleFailedCount))} add-on item(s) could not be reserved (likely already sold).</p>`
+            : "";
 
     const shell = el(`
         <div class="cdm-shell cdm-checkout-shell">
@@ -8475,6 +8918,8 @@ function renderCheckoutSuccess() {
                         </p>
                         ${saleRef}
                         ${payLine}
+                        ${bundleNote}
+                        ${partialNote}
                         ${
                             s.serverBacked && s.transactionId != null
                                 ? `<details class="text-start small text-muted mb-4 mx-auto" style="max-width: 26rem">
@@ -8533,33 +8978,47 @@ function renderTransactions() {
         let sellServer = [];
         let apiBuyOk = false;
         let apiSellOk = false;
-        if (state.token && !isJwtLikelyExpired(state.token)) {
-            const [mineRes, salesRes] = await Promise.all([
-                apiJson("/api/transactions/mine?limit=48"),
-                apiJson("/api/transactions/sales?limit=48"),
-            ]);
-            apiBuyOk = mineRes.res.ok;
-            apiSellOk = salesRes.res.ok;
-            if (mineRes.res.status === 401 || salesRes.res.status === 401) {
-                clearClientAuthSession();
-                apiBuyOk = false;
-                apiSellOk = false;
-            } else {
-                if (mineRes.res.ok && Array.isArray(mineRes.data)) {
-                    buyServer = mineRes.data.map((d) => mapServerTransactionToRow(d, "buy"));
+        let fallbackMode = state.appMode === "demo-fallback" || state.apiHealth?.status === "down";
+        if (state.token && !isJwtLikelyExpired(state.token) && !fallbackMode) {
+            try {
+                const [mineRes, salesRes] = await Promise.all([
+                    apiJson("/api/transactions/mine?limit=48"),
+                    apiJson("/api/transactions/sales?limit=48"),
+                ]);
+                apiBuyOk = mineRes.res.ok;
+                apiSellOk = salesRes.res.ok;
+                if (mineRes.res.status === 401 || salesRes.res.status === 401) {
+                    clearClientAuthSession();
+                    apiBuyOk = false;
+                    apiSellOk = false;
+                } else {
+                    if (mineRes.res.ok && Array.isArray(mineRes.data)) {
+                        buyServer = mineRes.data.map((d) => mapServerTransactionToRow(d, "buy"));
+                    }
+                    if (salesRes.res.ok && Array.isArray(salesRes.data)) {
+                        sellServer = salesRes.data.map((d) => mapServerTransactionToRow(d, "sell"));
+                    }
+                    state.appMode = "live";
                 }
-                if (salesRes.res.ok && Array.isArray(salesRes.data)) {
-                    sellServer = salesRes.data.map((d) => mapServerTransactionToRow(d, "sell"));
+                if (!mineRes.res.ok && !salesRes.res.ok && (mineRes.res.status >= 500 || salesRes.res.status >= 500)) {
+                    fallbackMode = true;
+                    state.appMode = "demo-fallback";
                 }
+            } catch {
+                fallbackMode = true;
+                state.appMode = "demo-fallback";
             }
         } else if (state.token && isJwtLikelyExpired(state.token)) {
             clearClientAuthSession();
         }
         const localDemo = loadLocalTransactions().filter((t) => t.listingId == null);
+        const demoFallbackRows = fallbackMode ? buildDemoTransactionRows() : [];
         renderTransactionsMounted({
             buyRows: buyServer,
             sellRows: sellServer,
             localDemo,
+            demoFallbackRows,
+            fallbackMode,
             apiBuyOk,
             apiSellOk,
             serverBuyCount: buyServer.length,
@@ -8569,11 +9028,16 @@ function renderTransactions() {
 }
 
 function renderTransactionsMounted(opts) {
-    const { buyRows, sellRows, localDemo, apiBuyOk, apiSellOk, serverBuyCount, serverSellCount } = opts;
-    const mergedBuy = [...buyRows, ...localDemo].sort(
+    const { buyRows, sellRows, localDemo, demoFallbackRows, fallbackMode, apiBuyOk, apiSellOk, serverBuyCount, serverSellCount } = opts;
+    const fallbackBuy = Array.isArray(demoFallbackRows) ? demoFallbackRows.filter((r) => r.txRole === "buy") : [];
+    const fallbackSell = Array.isArray(demoFallbackRows) ? demoFallbackRows.filter((r) => r.txRole === "sell") : [];
+    const mergedBuy = [...buyRows, ...localDemo, ...fallbackBuy].sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
-    const rows = state.txRole === "sell" ? sellRows : mergedBuy;
+    const mergedSell = [...sellRows, ...fallbackSell].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+    const rows = state.txRole === "sell" ? mergedSell : mergedBuy;
 
     const root = document.getElementById("app");
     root.innerHTML = "";
@@ -8666,6 +9130,8 @@ function renderTransactionsMounted(opts) {
         emptyLead = isSellerTab
             ? "No sales on your account yet — when a buyer completes checkout on your listing, it appears here."
             : "No purchases yet. Open a <strong>live feed</strong> listing and confirm checkout.";
+    } else if (rows.length === 0 && fallbackMode) {
+        emptyLead = "Backend is offline right now. Demo transaction cards appear here once you create local demo activity.";
     } else if (rows.length === 0 && state.token && !(isSellerTab ? apiSellOk : apiBuyOk)) {
         emptyLead = isSellerTab
             ? "Couldn’t load sales (this API may need an update — <code>GET /api/transactions/sales</code>)."
@@ -8710,6 +9176,11 @@ function renderTransactionsMounted(opts) {
                     String(t.status).toLowerCase() === "completed"
                         ? "cdm-tx-status cdm-tx-status--done"
                         : "cdm-tx-status";
+                const inactivityDays = transactionInactivityDaysForRow(t);
+                const isPending = ["awaiting_chat", "pending"].includes(String(t.status).toLowerCase());
+                const inactivityBadge = isPending
+                    ? `<span class="cdm-tx-status">${inactivityDays}d no chat</span>`
+                    : "";
                 const headline = transactionStatusHeadline(t.status, t.kind, isSellerView);
                 const rel = formatRelativeTimeShort(t.createdAt);
                 const abs = escapeHtml(formatSavedAt(t.createdAt));
@@ -8742,6 +9213,7 @@ function renderTransactionsMounted(opts) {
                     t.listingKey && String(t.listingKey).trim()
                         ? `<button type="button" class="btn btn-sm cdm-btn-crimson rounded-pill px-3" data-action="tx-open-listing" data-listing-key="${escapeHtml(String(t.listingKey).trim())}">View listing</button>`
                         : "";
+                const txId = t.transactionId != null && Number.isFinite(Number(t.transactionId)) ? Number(t.transactionId) : null;
                 const msgSellerBtn =
                     !isSellerView &&
                     t.sellerUserId != null &&
@@ -8760,6 +9232,37 @@ function renderTransactionsMounted(opts) {
                     String(t.listingKey).trim()
                         ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="tx-msg-buyer" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey).trim())}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}" data-buyer-id="${escapeAttrForDoubleQuoted(String(t.buyerUserId))}" data-buyer-name="${escapeAttrForDoubleQuoted(String(t.buyerDisplayName || "Buyer"))}">Message buyer</button>`
                         : "";
+                const canShowConfirm = txId != null && String(t.status || "").toLowerCase() !== "completed";
+                const actorAlreadyConfirmed = isSellerView ? Boolean(t.sellerConfirmed) : Boolean(t.buyerConfirmed);
+                const confirmLabel = isSellerView ? "Mark handoff done" : "Mark pickup done";
+                const confirmBtn = canShowConfirm
+                    ? `<button
+                            type="button"
+                            class="btn btn-sm btn-outline-success rounded-pill px-3"
+                            data-action="tx-confirm-complete"
+                            data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
+                            ${actorAlreadyConfirmed ? "disabled aria-disabled=\"true\"" : ""}
+                        >${actorAlreadyConfirmed ? "Confirmed by you" : confirmLabel}</button>`
+                    : "";
+                const confirmHint = canShowConfirm ? txConfirmHintHtml(t, isSellerView) : "";
+                const staleWarning =
+                    isSellerView && isPending && inactivityDays >= 15
+                        ? `<div class="alert alert-warning py-2 px-3 small mt-2 mb-0">
+                            <strong>15+ day no-contact warning.</strong>
+                            If this buyer ghosted, move this back to donations so someone else can claim it.
+                        </div>`
+                        : "";
+                const moveDonationBtn =
+                    isSellerView && isPending && inactivityDays >= 15 && txId != null && Number(t.listingId) > 0
+                        ? `<button
+                            type="button"
+                            class="btn btn-sm btn-outline-warning rounded-pill px-3"
+                            data-action="tx-move-donation"
+                            data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
+                            data-listing-id="${escapeAttrForDoubleQuoted(String(t.listingId))}"
+                            data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
+                        >Move to donations</button>`
+                        : "";
                 return `
             <article class="cdm-tx-card mb-3">
                 <div class="cdm-tx-card-statusline">${headline}</div>
@@ -8768,17 +9271,21 @@ function renderTransactionsMounted(opts) {
                     <div class="flex-grow-1 min-w-0">
                         <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-1">
                             <h2 class="cdm-tx-card-title h6 mb-0">${escapeHtml(t.title)}</h2>
-                            <div class="d-flex flex-wrap gap-2 align-items-center">${kindBadge}${payChip ? ` ${payChip}` : ""}<span class="${statusClass}">${statusText}</span></div>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">${kindBadge}${payChip ? ` ${payChip}` : ""}<span class="${statusClass}">${statusText}</span>${inactivityBadge}</div>
                         </div>
                         ${sellerLine}
                         ${buyerLine}
                         <div class="cdm-tx-meta">${timeLine}</div>
                         ${refLine}
                         ${moneyBlockHtml}
+                        ${confirmHint}
+                        ${staleWarning}
                     </div>
                 </div>
                 <div class="cdm-tx-actions d-flex flex-wrap gap-2 mt-3 pt-3">
                     ${listingBtn}
+                    ${confirmBtn}
+                    ${moveDonationBtn}
                     ${msgSellerBtn}
                     ${msgBuyerBtn}
                 </div>
@@ -8839,7 +9346,9 @@ function renderTransactionsMounted(opts) {
                     </div>
                     <p class="cdm-tx-demo-note small mb-3">
                         ${
-                            state.txRole === "sell"
+                            fallbackMode
+                                ? "Demo fallback mode: showing local/sample transaction activity while backend is unavailable."
+                                : state.txRole === "sell"
                                 ? serverSellCount > 0
                                     ? `<strong>${serverSellCount}</strong> sale${serverSellCount === 1 ? "" : "s"} from the server.`
                                     : state.token
@@ -9068,12 +9577,14 @@ async function checkHealth() {
         const data = await response.json();
         console.log("Health check response:", data);
         state.apiHealth = data;
+        state.appMode = String(data?.status || "").toLowerCase() === "down" ? "demo-fallback" : "live";
 
         const pill = document.getElementById("api-pill");
         if (pill) pill.textContent = `API: ${data.status ?? "unknown"}`;
     } catch (error) {
         console.error("Health check failed:", error);
         state.apiHealth = { status: "down" };
+        state.appMode = "demo-fallback";
 
         const pill = document.getElementById("api-pill");
         if (pill) pill.textContent = "API: down";
