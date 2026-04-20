@@ -12,6 +12,7 @@ using System.Text.Json;
 EnvLoader.LoadLocalEnvFromUpwards(".env");
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddEnvironmentVariables();
 
 // Heroku add-ons often expose mysql:// only as DATABASE_URL / JAWSDB_URL; .env can mirror that for local dotnet run.
 DatabaseUrlResolver.ApplyIfNeeded(builder.Configuration);

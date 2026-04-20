@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {}
+    "C:\\Users\\Carte\\mis321\\projects\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {}
   },
   "projects": {
-    "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {
+    "C:\\Users\\Carte\\mis321\\projects\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
+        "projectUniqueName": "C:\\Users\\Carte\\mis321\\projects\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
         "projectName": "FullstackWithLlm.Api",
-        "projectPath": "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
-        "packagesPath": "C:\\Users\\cthof\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\obj\\",
+        "projectPath": "C:\\Users\\Carte\\mis321\\projects\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
+        "packagesPath": "C:\\Users\\Carte\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\Carte\\mis321\\projects\\MIS321Project2\\API\\FullstackWithLlm.Api\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\cthof\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "C:\\Users\\Carte\\AppData\\Roaming\\NuGet\\NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net8.0"

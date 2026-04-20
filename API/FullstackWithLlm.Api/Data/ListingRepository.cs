@@ -9,7 +9,8 @@ public sealed class ListingRepository
 
     public ListingRepository(IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("DefaultConnection");
+        var connectionString = configuration.GetConnectionString("DefaultConnection")
+            ?? configuration["ConnectionStrings:DefaultConnection"];
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             throw new InvalidOperationException(
