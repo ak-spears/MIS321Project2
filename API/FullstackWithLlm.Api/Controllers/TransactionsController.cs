@@ -36,6 +36,24 @@ public sealed class TransactionsController : ControllerBase
         return Ok(rows);
     }
 
+    /// <summary>Seller&apos;s sales (same newest-first list; includes buyer id/name for pickup coordination).</summary>
+    [HttpGet("sales")]
+    [ProducesResponseType(typeof(IReadOnlyList<TransactionListItemDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<ActionResult<IReadOnlyList<TransactionListItemDto>>> GetMySales(
+        [FromQuery] int limit = 48,
+        CancellationToken cancellationToken = default)
+    {
+        var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        {
+            return Unauthorized();
+        }
+
+        var rows = await _transactions.GetMineAsSellerAsync(userId, limit, cancellationToken);
+        return Ok(rows);
+    }
+
     /// <summary>Complete checkout: creates a row in <c>transactions</c> and marks the listing <c>sold</c>.</summary>
     [HttpPost]
     [ProducesResponseType(typeof(TransactionListItemDto), StatusCodes.Status201Created)]

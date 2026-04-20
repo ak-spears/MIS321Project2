@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {}
+    "c:\\Users\\treyv\\Documents\\source\\321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {}
   },
   "projects": {
-    "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {
+    "c:\\Users\\treyv\\Documents\\source\\321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
+        "projectUniqueName": "c:\\Users\\treyv\\Documents\\source\\321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
         "projectName": "FullstackWithLlm.Api",
-        "projectPath": "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
-        "packagesPath": "C:\\Users\\cthof\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\cthof\\mis321\\MIS321Project2\\API\\FullstackWithLlm.Api\\obj\\",
+        "projectPath": "c:\\Users\\treyv\\Documents\\source\\321\\MIS321Project2\\API\\FullstackWithLlm.Api\\FullstackWithLlm.Api.csproj",
+        "packagesPath": "C:\\Users\\treyv\\.nuget\\packages\\",
+        "outputPath": "c:\\Users\\treyv\\Documents\\source\\321\\MIS321Project2\\API\\FullstackWithLlm.Api\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\cthof\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "C:\\Users\\treyv\\AppData\\Roaming\\NuGet\\NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net8.0"
@@ -68,24 +68,6 @@
           ],
           "assetTargetFallback": true,
           "warn": true,
-          "downloadDependencies": [
-            {
-              "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[8.0.19, 8.0.19]"
-            },
-            {
-              "name": "Microsoft.NETCore.App.Host.win-x64",
-              "version": "[8.0.19, 8.0.19]"
-            },
-            {
-              "name": "Microsoft.NETCore.App.Ref",
-              "version": "[8.0.19, 8.0.19]"
-            },
-            {
-              "name": "Microsoft.WindowsDesktop.App.Ref",
-              "version": "[8.0.19, 8.0.19]"
-            }
-          ],
           "frameworkReferences": {
             "Microsoft.AspNetCore.App": {
               "privateAssets": "none"

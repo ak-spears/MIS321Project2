@@ -46,9 +46,12 @@ public sealed class TransactionRepository
                 t.platform_fee,
                 t.payment_method,
                 t.status,
-                t.created_at
+                t.created_at,
+                t.seller_id,
+                COALESCE(su.display_name, 'Seller') AS seller_display_name
             FROM transactions t
             LEFT JOIN listings l ON l.listing_id = t.listing_id
+            LEFT JOIN users su ON su.user_id = t.seller_id
             WHERE t.buyer_id = @buyer_id
             ORDER BY t.created_at DESC
             LIMIT @limit;
@@ -74,6 +77,74 @@ public sealed class TransactionRepository
                 PaymentMethod = reader.GetString(reader.GetOrdinal("payment_method")),
                 Status = reader.GetString(reader.GetOrdinal("status")),
                 CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
+                SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
+                SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
+            });
+        }
+
+        return list;
+    }
+
+    /// <summary>Seller&apos;s completed checkouts (same row shape as buyer list; includes buyer for coordination).</summary>
+    public async Task<IReadOnlyList<TransactionListItemDto>> GetMineAsSellerAsync(
+        int sellerId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit < 1)
+        {
+            limit = 48;
+        }
+
+        if (limit > 200)
+        {
+            limit = 200;
+        }
+
+        const string sql = """
+            SELECT
+                t.transaction_id,
+                t.listing_id,
+                COALESCE(l.title, '(listing unavailable)') AS title,
+                t.amount,
+                t.platform_fee,
+                t.payment_method,
+                t.status,
+                t.created_at,
+                t.seller_id,
+                t.buyer_id,
+                COALESCE(b.display_name, '(buyer)') AS buyer_display_name
+            FROM transactions t
+            LEFT JOIN listings l ON l.listing_id = t.listing_id
+            LEFT JOIN users b ON b.user_id = t.buyer_id
+            WHERE t.seller_id = @seller_id
+            ORDER BY t.created_at DESC
+            LIMIT @limit;
+            """;
+
+        await using var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@seller_id", sellerId);
+        cmd.Parameters.AddWithValue("@limit", limit);
+
+        var list = new List<TransactionListItemDto>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            list.Add(new TransactionListItemDto
+            {
+                TransactionId = reader.GetInt32(reader.GetOrdinal("transaction_id")),
+                ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
+                Title = reader.GetString(reader.GetOrdinal("title")),
+                Amount = reader.GetDecimal(reader.GetOrdinal("amount")),
+                PlatformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee")),
+                PaymentMethod = reader.GetString(reader.GetOrdinal("payment_method")),
+                Status = reader.GetString(reader.GetOrdinal("status")),
+                CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
+                SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
+                BuyerId = reader.GetInt32(reader.GetOrdinal("buyer_id")),
+                BuyerDisplayName = reader.GetString(reader.GetOrdinal("buyer_display_name")),
             });
         }
 
@@ -216,6 +287,8 @@ public sealed class TransactionRepository
                 PaymentMethod = paymentMethod,
                 Status = "pending",
                 CreatedAt = createdAtRow,
+                SellerId = sellerId,
+                BuyerId = buyerId,
             };
         }
         catch

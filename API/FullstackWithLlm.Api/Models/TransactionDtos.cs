@@ -25,4 +25,16 @@ public sealed class TransactionListItemDto
     /// <summary>pending | completed | cancelled</summary>
     public string Status { get; init; } = "pending";
     public DateTime CreatedAt { get; init; }
+
+    /// <summary>Set on <c>GET /api/transactions/sales</c> for seller inbox (Messages / coordination).</summary>
+    public int? BuyerId { get; init; }
+
+    /// <summary>Buyer display name when the viewer is the seller.</summary>
+    public string? BuyerDisplayName { get; init; }
+
+    /// <summary>Set on <c>GET /api/transactions/mine</c> so the buyer can message the seller from the row.</summary>
+    public int? SellerId { get; init; }
+
+    /// <summary>Seller display name on buyer&apos;s transaction rows.</summary>
+    public string? SellerDisplayName { get; init; }
 }

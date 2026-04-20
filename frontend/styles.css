@@ -894,6 +894,126 @@ button.cdm-chip {
     color: var(--cdm-ink);
 }
 
+.cdm-seller-mini-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: rgba(158, 27, 50, 0.12);
+    color: var(--cdm-crimson);
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
+}
+
+.cdm-checkout-money {
+    margin: 0.25rem 0 0;
+}
+
+.cdm-checkout-money-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.9375rem;
+    margin-bottom: 0.35rem;
+}
+
+.cdm-checkout-money-row--muted {
+    color: #86868b;
+    font-size: 0.8125rem;
+}
+
+.cdm-checkout-money-row--muted .cdm-checkout-money-amt {
+    font-weight: 500;
+    color: #86868b;
+}
+
+.cdm-checkout-money-label {
+    color: var(--cdm-ink);
+    font-weight: 500;
+}
+
+.cdm-checkout-money-row--muted .cdm-checkout-money-label {
+    font-weight: 400;
+    color: #86868b;
+}
+
+.cdm-checkout-money-amt {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    text-align: right;
+    color: var(--cdm-ink);
+}
+
+.cdm-checkout-money-row--total {
+    margin-top: 0.35rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    margin-bottom: 0;
+}
+
+.cdm-checkout-money-row--total .cdm-checkout-money-label {
+    font-weight: 600;
+}
+
+.cdm-checkout-money-row--total .cdm-checkout-money-amt {
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.cdm-checkout-money-note {
+    color: #86868b;
+    line-height: 1.45;
+}
+
+.cdm-checkout-money--free .cdm-checkout-money-row--total {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.cdm-checkout-pay-tile {
+    display: block;
+    margin: 0;
+    padding: 0.85rem 1rem;
+    border-radius: 14px;
+    border: 2px solid rgba(0, 0, 0, 0.1);
+    background: #fafafa;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cdm-checkout-pay-tile:hover {
+    border-color: rgba(158, 27, 50, 0.35);
+    background: #fff;
+}
+
+.cdm-checkout-pay-tile.is-selected {
+    border-color: var(--cdm-crimson);
+    background: rgba(158, 27, 50, 0.06);
+    box-shadow: 0 0 0 1px rgba(158, 27, 50, 0.12);
+}
+
+.cdm-checkout-pay-tile-title {
+    display: block;
+    font-weight: 600;
+    color: var(--cdm-ink);
+    font-size: 0.98rem;
+    letter-spacing: -0.01em;
+}
+
+.cdm-checkout-pay-tile-sub {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+    color: #86868b;
+    line-height: 1.35;
+}
+
 .cdm-checkout-line {
     border: 0;
     border-top: 1px solid rgba(0, 0, 0, 0.08);
@@ -1113,14 +1233,14 @@ button.cdm-chip {
     display: flex;
     align-items: flex-start;
     width: 100%;
-    max-width: 400px;
+    max-width: 28rem;
 }
 
 .cdm-checkout-progress-col {
     display: flex;
     flex-direction: column;
     align-items: center;
-    width: 3.75rem;
+    width: 4.25rem;
     flex-shrink: 0;
 }
 
@@ -1324,6 +1444,79 @@ button.cdm-chip {
     border-bottom: 0;
 }
 
+.cdm-tx-fee-grid--card {
+    background: #fafafa;
+    border-radius: 14px;
+    padding: 0.5rem 0.9rem;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cdm-tx-fee-grid--card .cdm-tx-fee-row {
+    border-bottom-color: rgba(0, 0, 0, 0.05);
+}
+
+.cdm-tx-fee-grid--claim .cdm-tx-fee-row--strong {
+    border-top: 0;
+    margin-top: 0;
+    padding-top: 0;
+}
+
+.cdm-tx-fee-row--muted {
+    font-size: 0.8125rem;
+    color: #86868b;
+}
+
+.cdm-tx-fee-row--muted .cdm-tx-fee-amt {
+    font-weight: 500;
+    color: #86868b;
+}
+
+.cdm-tx-fee-amt {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.cdm-tx-role-tabs--segmented {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    padding: 0.3rem;
+    background: #f5f5f7;
+    border-radius: 14px;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cdm-tx-role-tabs--segmented .btn {
+    border-radius: 11px !important;
+    border: none;
+    padding: 0.45rem 1.1rem;
+    font-weight: 600;
+}
+
+.cdm-tx-role-tabs--segmented .btn-outline-dark {
+    background: transparent;
+    color: #424245;
+}
+
+.cdm-tx-role-tabs--segmented .btn-outline-dark:hover {
+    background: rgba(158, 27, 50, 0.08);
+    color: var(--cdm-crimson);
+}
+
+.cdm-tx-role-tabs--segmented .btn-dark {
+    background: var(--cdm-crimson) !important;
+    border-color: var(--cdm-crimson) !important;
+    color: #fff !important;
+}
+
+.cdm-tx-role-tabs--segmented .btn-dark:hover {
+    background: var(--cdm-crimson-dark) !important;
+    border-color: var(--cdm-crimson-dark) !important;
+    color: #fff !important;
+}
+
 .cdm-tx-actions {
     border-top: 1px solid rgba(0, 0, 0, 0.06) !important;
 }
@@ -1369,6 +1562,38 @@ button.cdm-chip {
     border-color: rgba(158, 27, 50, 0.35) !important;
     background: rgba(158, 27, 50, 0.08) !important;
     color: var(--cdm-crimson) !important;
+}
+
+.cdm-tx-role-tabs .btn {
+    font-size: 0.8125rem;
+    font-weight: 600;
+}
+
+.cdm-tx-pay-chip {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    padding: 0.25rem 0.55rem;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.06);
+    color: #424245;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    max-width: 100%;
+    line-height: 1.25;
+}
+
+.cdm-tx-pay-chip--app {
+    background: rgba(0, 102, 204, 0.1);
+    border-color: rgba(0, 102, 204, 0.22);
+    color: #0b4a8f;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cdm-tx-stat-pill--pulse {
+        animation: none !important;
+    }
 }
 
 .cdm-tx-filters {

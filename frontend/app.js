@@ -233,6 +233,10 @@ const state = {
     feedMatchScoreByListingId: /** @type {Record<string, number>} */ ({}),
     /** Admin dashboard: `GET /api/admin/dashboard?weeks=` (1–52). */
     adminDashboardWeeks: 12,
+    /** Transactions page: purchases vs sales. */
+    txRole: /** @type {'buy' | 'sell'} */ ("buy"),
+    /** Transactions page: all vs needs-action filter. */
+    txFilter: /** @type {'all' | 'action'} */ ("all"),
 };
 
 /**
@@ -431,8 +435,8 @@ function clearLocalTransactions() {
     localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
 }
 
-/** Maps GET /api/transactions/mine row → UI row (matches localStorage shape). */
-function mapServerTransactionToRow(d) {
+/** Maps GET /api/transactions/mine | /sales row → UI row (matches localStorage shape). */
+function mapServerTransactionToRow(d, txRole = "buy") {
     const amount = Number(d.amount);
     const isPurchase = amount > 0;
     const st = String(d.status || "").toLowerCase();
@@ -447,8 +451,18 @@ function mapServerTransactionToRow(d) {
     }
     const lid = d.listingId ?? d.ListingId;
     const tid = d.transactionId ?? d.TransactionId;
+    const pmRaw = String(d.paymentMethod ?? d.PaymentMethod ?? "cash").toLowerCase();
+    const paymentMethod = pmRaw === "card" ? "card" : "cash";
+    const bidRaw = d.buyerId ?? d.BuyerId;
+    const buyerUserId = bidRaw != null && Number.isFinite(Number(bidRaw)) ? Number(bidRaw) : null;
+    const bname = d.buyerDisplayName ?? d.BuyerDisplayName;
+    const sidRaw = d.sellerId ?? d.SellerId;
+    const sellerUserId = sidRaw != null && Number.isFinite(Number(sidRaw)) ? Number(sidRaw) : null;
+    const sname = d.sellerDisplayName ?? d.SellerDisplayName;
+    const sellerDisplayName =
+        sname != null && String(sname).trim() ? String(sname).trim() : sellerUserId ? `User #${sellerUserId}` : "Seller";
     return {
-        id: `srv-${tid}`,
+        id: `srv-${txRole}-${tid}`,
         fromServer: true,
         createdAt: createdAt || new Date().toISOString(),
         title: d.title,
@@ -459,30 +473,114 @@ function mapServerTransactionToRow(d) {
         platformFee: Number(d.platformFee) || 0,
         sellerNet: isPurchase ? amount - (Number(d.platformFee) || 0) : 0,
         status: uiStatus,
+        paymentMethod,
+        buyerUserId,
+        buyerDisplayName: bname != null && String(bname).trim() ? String(bname).trim() : null,
+        sellerUserId,
+        sellerDisplayName,
+        txRole,
     };
 }
 
-function transactionStatusLabel(status) {
+function transactionStatusLabel(status, isSellerView = false) {
     const s = String(status || "").toLowerCase();
-    if (s === "pending" || s === "awaiting_chat") return "Next: message seller";
+    if (s === "pending" || s === "awaiting_chat") {
+        return isSellerView ? "Next: coordinate with buyer" : "Next: message seller";
+    }
     if (s === "completed") return "Completed";
     if (s === "cancelled") return "Cancelled";
     return status || "In progress";
 }
 
 /** Big friendly status line (Bama Marketplace ≠ corporate order copy). */
-function transactionStatusHeadline(status, kind) {
+function transactionStatusHeadline(status, kind, isSellerView = false) {
     const s = String(status || "").toLowerCase();
     const isPurchase = kind === "purchase";
     if (s === "awaiting_chat" || s === "pending") {
+        if (isSellerView) {
+            return isPurchase
+                ? "Buyer reserved this — lock in pickup &amp; how they’ll pay"
+                : "Someone claimed this — schedule free pickup";
+        }
         return isPurchase
             ? "Message them: lock in pickup &amp; payment"
             : "Message them: schedule pickup (it’s free)";
     }
-    if (s === "completed") return "You’re good. Enjoy the dorm win";
+    if (s === "completed") return isSellerView ? "Sale recorded as complete" : "You’re good. Enjoy the dorm win";
     if (s === "cancelled") return "This one didn’t happen";
     return "In progress";
 }
+
+/** Human label for saved payment method (DB: cash | card). Matches checkout copy. */
+function transactionPaymentMethodLabel(pm) {
+    const p = String(pm || "cash").toLowerCase();
+    return p === "card" ? "Venmo, Zelle, Cash App" : "Cash at pickup";
+}
+
+/** Paid / free price block — same mental model as checkout money stack. */
+function transactionPurchaseMoneyHtml(t, isSellerView) {
+    const list = Number(t.listPrice);
+    if (!Number.isFinite(list) || list <= 0) return "";
+    let fee = Number(t.platformFee);
+    if (!Number.isFinite(fee) || fee < 0) fee = platformFeeFromSale(list);
+    let net = Number(t.sellerNet);
+    if (!Number.isFinite(net) || net < 0) net = sellerNetFromSale(list);
+    const feeBuyer = "Platform fee (7%, seller side)";
+    const feeSeller = "Platform fee (7%, from proceeds)";
+
+    if (isSellerView) {
+        return `<div class="cdm-tx-fee-grid cdm-tx-fee-grid--card mt-2" role="group" aria-label="Sale breakdown">
+            <div class="cdm-tx-fee-row">
+                <span>Sale amount</span>
+                <span class="cdm-tx-fee-amt">${formatUsd(list)}</span>
+            </div>
+            <div class="cdm-tx-fee-row cdm-tx-fee-row--muted">
+                <span>${feeSeller}</span>
+                <span class="cdm-tx-fee-amt">\u2212${formatUsd(fee)}</span>
+            </div>
+            <div class="cdm-tx-fee-row cdm-tx-fee-row--strong">
+                <span>You keep</span>
+                <span class="cdm-tx-fee-amt">${formatUsd(net)}</span>
+            </div>
+        </div>
+        <p class="cdm-tx-footnote mb-0 mt-2">Buyer paid list price at checkout. Settle with them directly (cash or app).</p>`;
+    }
+    return `<div class="cdm-tx-fee-grid cdm-tx-fee-grid--card mt-2" role="group" aria-label="What you paid">
+        <div class="cdm-tx-fee-row">
+            <span>List price</span>
+            <span class="cdm-tx-fee-amt">${formatUsd(list)}</span>
+        </div>
+        <div class="cdm-tx-fee-row cdm-tx-fee-row--muted">
+            <span>${feeBuyer}</span>
+            <span class="cdm-tx-fee-amt">${formatUsd(fee)}</span>
+        </div>
+        <div class="cdm-tx-fee-row cdm-tx-fee-row--strong">
+            <span>Total you paid</span>
+            <span class="cdm-tx-fee-amt">${formatUsd(list)}</span>
+        </div>
+    </div>
+    <p class="cdm-tx-footnote mb-0 mt-2">This fee isn\u2019t added on top of your total \u2014 it comes from the seller\u2019s side.</p>`;
+}
+
+function transactionClaimMoneyHtml() {
+    return `<div class="cdm-tx-fee-grid cdm-tx-fee-grid--card cdm-tx-fee-grid--claim mt-2" role="group" aria-label="Price">
+        <div class="cdm-tx-fee-row cdm-tx-fee-row--strong">
+            <span>Total you pay</span>
+            <span class="cdm-tx-fee-amt">${formatUsd(0)}</span>
+        </div>
+    </div>
+    <p class="cdm-tx-footnote mb-0 mt-2">No platform fee on free claims.</p>`;
+}
+
+/** Small pill in transaction cards. */
+function transactionPaymentChipHtml(pm) {
+    const label = transactionPaymentMethodLabel(pm);
+    const p = String(pm || "cash").toLowerCase();
+    const cls = p === "card" ? "cdm-tx-pay-chip cdm-tx-pay-chip--app" : "cdm-tx-pay-chip";
+    return `<span class="${cls}">${escapeHtml(label)}</span>`;
+}
+
+const CDM_CHECKOUT_PAYMENT_PREF_KEY = "cdm_checkout_payment_pref_v1";
 
 function formatRelativeTimeShort(iso) {
     try {
@@ -530,6 +628,18 @@ function sellerNetFromSale(price) {
     return Math.round((p - platformFeeFromSale(p)) * 100) / 100;
 }
 
+/** One-line seller badge for checkout summary (initials only, no PII beyond display name already shown). */
+function sellerMiniAvatarHtml(displayName) {
+    const raw = String(displayName || "").trim();
+    let initials = "?";
+    if (raw) {
+        const parts = raw.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) initials = (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+        else initials = parts[0].slice(0, 2).toUpperCase();
+    }
+    return `<span class="cdm-seller-mini-avatar" aria-hidden="true">${escapeHtml(initials)}</span>`;
+}
+
 /** Demo cards use `priceLabel` like "Free" or "$60". */
 function parseUsdFromPriceLabel(priceLabel) {
     const s = String(priceLabel || "").trim().toLowerCase();
@@ -551,28 +661,33 @@ function formatCheckoutPickupUrgencyHtml(ctx) {
     </div>`;
 }
 
+/**
+ * @param {"checkout" | "success" | "review"} phase Use `checkout` on the checkout page; `success` after confirm. `review` is treated like `checkout`.
+ */
 function checkoutProgressHtml(phase, centered = false) {
-    const review = phase === "review" ? "is-active" : "is-complete";
-    const confirm = phase === "review" ? "is-upcoming" : "is-complete";
-    const chat = phase === "success" ? "is-next" : "is-upcoming";
-    const line1 = phase === "review" ? "" : "is-complete";
-    const line2 = phase === "success" ? "is-complete" : "";
+    const onCheckout = phase === "checkout" || phase === "review";
+    const onSuccess = phase === "success";
+    const step1 = "is-complete";
+    const step2 = onSuccess ? "is-complete" : onCheckout ? "is-active" : "is-complete";
+    const step3 = onSuccess ? "is-next" : "is-upcoming";
+    const line1 = "is-complete";
+    const line2 = onSuccess ? "is-complete" : "";
     const mx = centered ? " mx-auto" : "";
     return `
         <div class="cdm-checkout-progress mb-4${mx}" aria-label="Checkout steps">
             <div class="cdm-checkout-progress-col">
-                <span class="cdm-checkout-progress-dot ${review}" aria-hidden="true"></span>
-                <span class="cdm-checkout-progress-label">Review</span>
+                <span class="cdm-checkout-progress-dot ${step1}" aria-hidden="true"></span>
+                <span class="cdm-checkout-progress-label">Item</span>
             </div>
             <div class="cdm-checkout-progress-connector ${line1}" aria-hidden="true"></div>
             <div class="cdm-checkout-progress-col">
-                <span class="cdm-checkout-progress-dot ${confirm}" aria-hidden="true"></span>
-                <span class="cdm-checkout-progress-label">Confirm</span>
+                <span class="cdm-checkout-progress-dot ${step2}" aria-hidden="true"></span>
+                <span class="cdm-checkout-progress-label">Pay plan</span>
             </div>
             <div class="cdm-checkout-progress-connector ${line2}" aria-hidden="true"></div>
             <div class="cdm-checkout-progress-col">
-                <span class="cdm-checkout-progress-dot ${chat}" aria-hidden="true"></span>
-                <span class="cdm-checkout-progress-label">Chat</span>
+                <span class="cdm-checkout-progress-dot ${step3}" aria-hidden="true"></span>
+                <span class="cdm-checkout-progress-label">Messages</span>
             </div>
         </div>
     `;
@@ -1399,7 +1514,7 @@ async function hydrateHomeTransactionsPanel(root) {
         return;
     }
 
-    const rows = Array.isArray(data) ? data.map(mapServerTransactionToRow) : [];
+    const rows = Array.isArray(data) ? data.map((d) => mapServerTransactionToRow(d, "buy")) : [];
     if (rows.length === 0) {
         panel.innerHTML = `
           <div class="cdm-card p-3">
@@ -1415,12 +1530,12 @@ async function hydrateHomeTransactionsPanel(root) {
         .slice(0, 5)
         .map((t) => {
             const price = t.kind === "claim" ? "Free" : formatUsd(Number(t.amount ?? 0));
-            const status = String(t.status || "").replace(/_/g, " ");
+            const status = escapeHtml(transactionStatusLabel(t.status, false));
             return `
               <div class="d-flex align-items-start justify-content-between gap-2 py-2 border-top">
                 <div class="min-w-0">
                   <div class="small fw-semibold text-truncate">${escapeHtml(t.title || "Purchase")}</div>
-                  <div class="cdm-muted small text-truncate">${escapeHtml(status)}</div>
+                  <div class="cdm-muted small text-truncate">${status}</div>
                 </div>
                 <div class="small fw-semibold flex-shrink-0">${escapeHtml(price)}</div>
               </div>
@@ -1611,7 +1726,59 @@ function setStoredConversations(rows) {
 }
 
 /**
- * Ensure a buyer<->seller thread exists for a listing and return it.
+ * Ensure a buyer↔seller thread exists for a listing (current user must be buyer or seller).
+ * @param {{ listingKey: string, listingTitle: string, buyerUserId: number, sellerUserId: number, buyerLabel: string, sellerLabel: string }} p
+ * @returns {MessageConversation | null}
+ */
+function ensureConversationPeers(p) {
+    const me = parseJwtSub(state.token);
+    if (me == null) return null;
+    const buyerUserId = Number(p.buyerUserId);
+    const sellerUserId = Number(p.sellerUserId);
+    if (!Number.isFinite(buyerUserId) || buyerUserId <= 0) return null;
+    if (!Number.isFinite(sellerUserId) || sellerUserId <= 0) return null;
+    if (buyerUserId === sellerUserId) return null;
+    if (me !== buyerUserId && me !== sellerUserId) return null;
+
+    const listingKey = String(p.listingKey || "").trim();
+    if (!listingKey) return null;
+
+    const rows = getStoredConversations();
+    const existing = rows.find(
+        (row) =>
+            String(row.listingKey) === listingKey &&
+            Number(row.buyerUserId) === buyerUserId &&
+            Number(row.sellerUserId) === sellerUserId,
+    );
+    const buyerLabel = String(p.buyerLabel || `User #${buyerUserId}`);
+    const sellerLabel = String(p.sellerLabel || `User #${sellerUserId}`);
+    if (existing) {
+        if (!existing.buyerLabel && buyerLabel) existing.buyerLabel = buyerLabel;
+        if (!existing.sellerLabel && sellerLabel) existing.sellerLabel = sellerLabel;
+        if (!existing.listingTitle && p.listingTitle) existing.listingTitle = String(p.listingTitle);
+        setStoredConversations(rows);
+        return existing;
+    }
+
+    const nowIso = new Date().toISOString();
+    const created = {
+        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        listingKey,
+        listingTitle: String(p.listingTitle || "Listing"),
+        sellerUserId,
+        sellerLabel,
+        buyerUserId,
+        buyerLabel,
+        updatedAt: nowIso,
+        messages: [],
+    };
+    rows.push(created);
+    setStoredConversations(rows);
+    return created;
+}
+
+/**
+ * Current user is buyer; opens thread with seller.
  * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
  * @returns {MessageConversation | null}
  */
@@ -1621,39 +1788,33 @@ function ensureConversationForListing(payload) {
     if (!Number.isFinite(payload.sellerUserId) || payload.sellerUserId <= 0) return null;
     if (buyerUserId === payload.sellerUserId) return null;
     const buyerLabel = state.authEmail || `User #${buyerUserId}`;
-    const listingKey = String(payload.listingKey || "").trim();
-    if (!listingKey) return null;
-
-    const rows = getStoredConversations();
-    const existing = rows.find(
-        (row) =>
-            String(row.listingKey) === listingKey &&
-            Number(row.buyerUserId) === buyerUserId &&
-            Number(row.sellerUserId) === Number(payload.sellerUserId),
-    );
-    if (existing) {
-        if (!existing.buyerLabel && buyerLabel) existing.buyerLabel = buyerLabel;
-        if (!existing.sellerLabel && payload.sellerLabel) existing.sellerLabel = payload.sellerLabel;
-        if (!existing.listingTitle && payload.listingTitle) existing.listingTitle = payload.listingTitle;
-        setStoredConversations(rows);
-        return existing;
-    }
-
-    const nowIso = new Date().toISOString();
-    const created = {
-        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        listingKey,
-        listingTitle: String(payload.listingTitle || "Listing"),
-        sellerUserId: Number(payload.sellerUserId),
-        sellerLabel: String(payload.sellerLabel || `User #${payload.sellerUserId}`),
+    return ensureConversationPeers({
+        listingKey: payload.listingKey,
+        listingTitle: payload.listingTitle,
         buyerUserId,
+        sellerUserId: Number(payload.sellerUserId),
         buyerLabel,
-        updatedAt: nowIso,
-        messages: [],
-    };
-    rows.push(created);
-    setStoredConversations(rows);
-    return created;
+        sellerLabel: String(payload.sellerLabel || `User #${payload.sellerUserId}`),
+    });
+}
+
+/**
+ * Current user is seller; opens thread with buyer (after a sale).
+ * @param {{ listingKey: string, listingTitle: string, buyerUserId: number, buyerLabel: string }} payload
+ */
+function ensureConversationForSellerToBuyer(payload) {
+    const me = parseJwtSub(state.token);
+    if (me == null) return null;
+    if (!Number.isFinite(payload.buyerUserId) || payload.buyerUserId <= 0) return null;
+    const sellerLabel = state.authEmail || `User #${me}`;
+    return ensureConversationPeers({
+        listingKey: payload.listingKey,
+        listingTitle: payload.listingTitle,
+        buyerUserId: Number(payload.buyerUserId),
+        sellerUserId: me,
+        buyerLabel: String(payload.buyerLabel || `User #${payload.buyerUserId}`),
+        sellerLabel,
+    });
 }
 
 /**
@@ -1668,6 +1829,24 @@ function openMessagesForListing(payload) {
     const conv = ensureConversationForListing(payload);
     if (!conv) {
         alert("Could not open messages for this listing.");
+        return;
+    }
+    state.messagesActiveConversationId = conv.id;
+    navigateMessages();
+}
+
+/**
+ * @param {{ listingKey: string, listingTitle: string, buyerUserId: number, buyerLabel: string }} payload
+ */
+function openMessagesWithBuyerForListing(payload) {
+    if (!isAuthed()) {
+        state.afterLoginIntent = { type: "navigate", view: "messages" };
+        navigateAuth("login");
+        return;
+    }
+    const conv = ensureConversationForSellerToBuyer(payload);
+    if (!conv) {
+        alert("Could not open messages for this buyer.");
         return;
     }
     state.messagesActiveConversationId = conv.id;
@@ -2106,6 +2285,37 @@ function wireNav(root) {
             }
         });
     });
+    root.querySelectorAll("[data-action='tx-set-role']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const r = btn.getAttribute("data-tx-role");
+            if (r === "buy" || r === "sell") {
+                state.txRole = r;
+                state.txFilter = "all";
+                render();
+            }
+        });
+    });
+    root.querySelectorAll("[data-action='tx-msg-seller']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = btn.getAttribute("data-listing-key") ?? "";
+            const title = btn.getAttribute("data-listing-title") ?? "Listing";
+            const sid = Number(btn.getAttribute("data-seller-id"));
+            const name = btn.getAttribute("data-seller-name") ?? "Seller";
+            if (!key || !Number.isFinite(sid) || sid <= 0) return;
+            openMessagesForListing({ listingKey: key, listingTitle: title, sellerUserId: sid, sellerLabel: name });
+        });
+    });
+    root.querySelectorAll("[data-action='tx-msg-buyer']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = btn.getAttribute("data-listing-key") ?? "";
+            const title = btn.getAttribute("data-listing-title") ?? "Listing";
+            const bid = Number(btn.getAttribute("data-buyer-id"));
+            const name = btn.getAttribute("data-buyer-name") ?? "Buyer";
+            if (!key || !Number.isFinite(bid) || bid <= 0) return;
+            openMessagesWithBuyerForListing({ listingKey: key, listingTitle: title, buyerUserId: bid, buyerLabel: name });
+        });
+    });
     root.querySelectorAll("[data-action='view-listing']").forEach((btn) => {
         btn.addEventListener("click", () => {
             const key = btn.getAttribute("data-listing-key");
@@ -2124,6 +2334,7 @@ function wireNav(root) {
                     title: snap.title,
                     price: snap.price,
                     sellerDisplayName: snap.sellerDisplayName,
+                    sellerUserId: snap.sellerUserId ?? null,
                     imageUrl: snap.imageUrl,
                     listingId: snap.listingId,
                     gapSolution: snap.gapSolution ?? null,
@@ -2147,6 +2358,7 @@ function wireTradeActions(root) {
                 title: snap.title,
                 price: snap.price,
                 sellerDisplayName: snap.sellerDisplayName,
+                sellerUserId: snap.sellerUserId ?? null,
                 imageUrl: snap.imageUrl,
                 listingId: snap.listingId,
                 gapSolution: snap.gapSolution ?? null,
@@ -2168,6 +2380,7 @@ function wireTradeActions(root) {
                 title: snap.title,
                 price: snap.price,
                 sellerDisplayName: snap.sellerDisplayName,
+                sellerUserId: snap.sellerUserId ?? null,
                 imageUrl: snap.imageUrl,
                 listingId: snap.listingId,
                 gapSolution: snap.gapSolution ?? null,
@@ -6582,6 +6795,60 @@ function resolveListingByKey(key) {
     return null;
 }
 
+/** After rendering a sold listing, wire “Message seller/buyer” when the viewer is party to the sale. */
+function hydrateListingSoldThreadCtas(shell, L) {
+    const buyerSlot = shell.querySelector("#cdm-sold-buyer-msg-slot");
+    const sellerSlot = shell.querySelector("#cdm-sold-seller-msg-slot");
+    if (!buyerSlot && !sellerSlot) return;
+    if (!state.token || isJwtLikelyExpired(state.token)) return;
+    const lid = Number(L.listingId ?? L.ListingId);
+    if (!Number.isFinite(lid) || lid <= 0) return;
+    const sellerNumeric = L.sellerId ?? L.SellerId;
+    const sellerIdNum = sellerNumeric != null ? Number(sellerNumeric) : NaN;
+    const sellerName = String(L.sellerDisplayName || "Seller");
+    void (async () => {
+        const [mineRes, salesRes] = await Promise.all([
+            apiJson("/api/transactions/mine?limit=120"),
+            apiJson("/api/transactions/sales?limit=120"),
+        ]);
+        if (buyerSlot && mineRes.res.ok && Array.isArray(mineRes.data)) {
+            const hit = mineRes.data.find((t) => Number(t.listingId ?? t.ListingId) === lid);
+            if (hit && Number.isFinite(sellerIdNum) && sellerIdNum > 0) {
+                buyerSlot.innerHTML = `<button type="button" class="btn btn-sm cdm-btn-crimson" data-action="message-seller" data-listing-key="db:${lid}" data-listing-title="${escapeAttrForDoubleQuoted(String(L.title || "Listing"))}" data-seller-id="${escapeAttrForDoubleQuoted(String(sellerIdNum))}" data-seller-name="${escapeAttrForDoubleQuoted(sellerName)}">Message seller</button>`;
+                buyerSlot.querySelectorAll("[data-action='message-seller']").forEach((btn) => {
+                    btn.addEventListener("click", () => {
+                        const listingKey = btn.getAttribute("data-listing-key") ?? "";
+                        const listingTitle = btn.getAttribute("data-listing-title") ?? "Listing";
+                        const sellerIdRaw = btn.getAttribute("data-seller-id");
+                        const sellerLabel = btn.getAttribute("data-seller-name") ?? "Seller";
+                        const sellerUserId = Number(sellerIdRaw);
+                        if (!Number.isFinite(sellerUserId) || sellerUserId <= 0) return;
+                        openMessagesForListing({ listingKey, listingTitle, sellerUserId, sellerLabel });
+                    });
+                });
+            }
+        }
+        if (sellerSlot && salesRes.res.ok && Array.isArray(salesRes.data)) {
+            const hit = salesRes.data.find((t) => Number(t.listingId ?? t.ListingId) === lid);
+            const bid = hit ? Number(hit.buyerId ?? hit.BuyerId) : NaN;
+            const bname = hit ? String(hit.buyerDisplayName ?? hit.BuyerDisplayName ?? "Buyer") : "";
+            if (hit && Number.isFinite(bid) && bid > 0) {
+                sellerSlot.innerHTML = `<button type="button" class="btn btn-sm cdm-btn-crimson" data-action="tx-msg-buyer" data-listing-key="db:${lid}" data-listing-title="${escapeAttrForDoubleQuoted(String(L.title || "Listing"))}" data-buyer-id="${escapeAttrForDoubleQuoted(String(bid))}" data-buyer-name="${escapeAttrForDoubleQuoted(bname)}">Message buyer</button>`;
+                sellerSlot.querySelectorAll("[data-action='tx-msg-buyer']").forEach((btn) => {
+                    btn.addEventListener("click", () => {
+                        const key = btn.getAttribute("data-listing-key") ?? "";
+                        const title = btn.getAttribute("data-listing-title") ?? "Listing";
+                        const id = Number(btn.getAttribute("data-buyer-id"));
+                        const name = btn.getAttribute("data-buyer-name") ?? "Buyer";
+                        if (!key || !Number.isFinite(id) || id <= 0) return;
+                        openMessagesWithBuyerForListing({ listingKey: key, listingTitle: title, buyerUserId: id, buyerLabel: name });
+                    });
+                });
+            }
+        }
+    })();
+}
+
 function renderListingDbFromApi(L, extra = null) {
     const root = document.getElementById("app");
     root.innerHTML = "";
@@ -6685,7 +6952,11 @@ function renderListingDbFromApi(L, extra = null) {
     let primaryCtaHtml;
     let footNoteHtml;
     if (isOwnListing) {
-        primaryCtaHtml = `<p class="small text-muted border rounded px-3 py-2 mb-0 mt-3">This is your listing — it isn’t shown on your home feed to buyers. Edit it from <strong>My listings</strong>.</p>`;
+        primaryCtaHtml = `<p class="small text-muted border rounded px-3 py-2 mb-0 mt-3">This is your listing — it isn’t shown on your home feed to buyers. Edit it from <strong>My listings</strong>.</p>${
+            isSold
+                ? `<div id="cdm-sold-seller-msg-slot" class="mt-2 px-1"></div>`
+                : ""
+        }`;
         footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Share the link or wait for buyers to find this on the public feed.</p>`;
     } else if (isSold) {
         const sidAttr = Number.isFinite(sellerId) && sellerId > 0 ? String(sellerId) : "";
@@ -6697,6 +6968,7 @@ function renderListingDbFromApi(L, extra = null) {
                     ? `<button type="button" class="btn btn-outline-dark btn-sm" data-action="view-seller" data-seller-id="${escapeAttrForDoubleQuoted(sidAttr)}">View seller profile</button>`
                     : ""
             }
+            <div id="cdm-sold-buyer-msg-slot" class="mt-2"></div>
           </div>`;
         footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Purchases are no longer available for this listing.</p>`;
     } else {
@@ -6853,6 +7125,9 @@ function renderListingDbFromApi(L, extra = null) {
     ensureAuthUi();
     wireListingImageFallbacks(shell);
     wireListingMatchReason(shell, Number(L.listingId), matchScore);
+    if (isSold) {
+        hydrateListingSoldThreadCtas(shell, L);
+    }
 }
 
 function wireListingMatchReason(root, listingId, defaultScore) {
@@ -7593,10 +7868,71 @@ function syncApiPill() {
     if (pill) pill.textContent = `API: ${state.apiHealth.status}`;
 }
 
+function wireCheckoutPaymentUi(root) {
+    const recap = root.querySelector("#checkout-payment-recap");
+    const inputs = root.querySelectorAll('input[name="checkout-payment"]');
+    if (!recap || inputs.length === 0) return;
+
+    try {
+        const pref = localStorage.getItem(CDM_CHECKOUT_PAYMENT_PREF_KEY);
+        const cashEl = root.querySelector("#checkout-pm-cash");
+        const appEl = root.querySelector("#checkout-pm-app");
+        if (pref === "card" && cashEl instanceof HTMLInputElement && appEl instanceof HTMLInputElement) {
+            appEl.checked = true;
+            cashEl.checked = false;
+        }
+    } catch {
+        /* ignore */
+    }
+
+    const syncPayTiles = () => {
+        root.querySelectorAll(".cdm-checkout-pay-tile").forEach((tile) => tile.classList.remove("is-selected"));
+        const checked = root.querySelector('input[name="checkout-payment"]:checked');
+        if (checked && checked.id) {
+            const lab = root.querySelector(`label[for="${checked.id}"]`);
+            if (lab) lab.classList.add("is-selected");
+        }
+    };
+
+    const updateRecap = () => {
+        const el = root.querySelector('input[name="checkout-payment"]:checked');
+        const v = el?.getAttribute("value") === "card" ? "card" : "cash";
+        recap.textContent =
+            v === "card" ? "We’ll save: Pay seller via app (outside Bama Marketplace)" : "We’ll save: Cash at pickup";
+        syncPayTiles();
+    };
+
+    inputs.forEach((inp) => {
+        inp.addEventListener("change", () => {
+            try {
+                const v = root.querySelector('input[name="checkout-payment"]:checked')?.getAttribute("value");
+                if (v === "cash" || v === "card") localStorage.setItem(CDM_CHECKOUT_PAYMENT_PREF_KEY, v);
+            } catch {
+                /* ignore */
+            }
+            updateRecap();
+        });
+    });
+    updateRecap();
+}
+
+function showCheckoutError(root, messageHtml) {
+    const slot = root.querySelector("#checkout-error-slot");
+    if (!slot) return;
+    slot.innerHTML = messageHtml
+        ? `<div class="alert alert-danger py-2 px-3 small mb-3" role="alert" tabindex="-1">${messageHtml}</div>`
+        : "";
+    const alertEl = slot.querySelector(".alert");
+    if (alertEl instanceof HTMLElement) alertEl.focus();
+}
+
 function wireCheckoutPage(root) {
+    wireCheckoutPaymentUi(root);
+
     root.querySelector("#checkout-confirm-btn")?.addEventListener("click", async () => {
         const ctx = state.checkoutContext;
         if (!ctx) return;
+        showCheckoutError(root, "");
         if (!state.token) {
             requireAuth({ type: "buy", listingKey: String(ctx.key ?? "") });
             return;
@@ -7605,6 +7941,12 @@ function wireCheckoutPage(root) {
         const listingIdNum = resolveNumericListingIdFromCheckoutContext(ctx);
         const useApi = Number.isFinite(listingIdNum) && listingIdNum > 0;
 
+        const getSelectedPaymentMethod = () => {
+            if (!isSale) return "cash";
+            const el = root.querySelector('input[name="checkout-payment"]:checked');
+            return el?.getAttribute("value") === "card" ? "card" : "cash";
+        };
+
         const btn = root.querySelector("#checkout-confirm-btn");
         const label = isSale ? "Confirm purchase" : "Claim item";
         let serverBacked = false;
@@ -7612,24 +7954,27 @@ function wireCheckoutPage(root) {
         let savedTransactionId = null;
         /** @type {number | null} */
         let savedListingIdForTx = null;
+        /** @type {unknown} */
+        let postCheckoutPayload = null;
         if (useApi) {
             if (btn) {
                 btn.disabled = true;
                 btn.textContent = "Confirming…";
             }
+            const paymentMethod = getSelectedPaymentMethod();
             let res;
             let data;
             try {
                 ({ res, data } = await apiJson("/api/transactions", {
                     method: "POST",
-                    body: JSON.stringify({ listingId: listingIdNum, paymentMethod: "cash" }),
+                    body: JSON.stringify({ listingId: listingIdNum, paymentMethod }),
                 }));
             } catch {
                 if (btn) {
                     btn.disabled = false;
                     btn.textContent = label;
                 }
-                alert(formatAuthNetworkError());
+                showCheckoutError(root, escapeHtml(formatAuthNetworkError()));
                 return;
             }
             if (btn) {
@@ -7640,7 +7985,7 @@ function wireCheckoutPage(root) {
                 if (res.status === 401) {
                     setStoredToken(null);
                     state.token = null;
-                    alert("Session expired — sign in again to complete checkout.");
+                    showCheckoutError(root, escapeHtml("Session expired — sign in again to complete checkout."));
                     navigateAuth("login");
                     return;
                 }
@@ -7650,11 +7995,12 @@ function wireCheckoutPage(root) {
                         ? "That listing is no longer available."
                         : "Could not complete checkout.",
                 );
-                alert(msg);
+                showCheckoutError(root, escapeHtml(msg));
                 return;
             }
             serverBacked = true;
             savedListingIdForTx = listingIdNum;
+            postCheckoutPayload = data;
             savedTransactionId = parseTransactionIdFromApiPayload(data);
             /** @type {{ res: Response; data: unknown } | null} */
             let minePoll = null;
@@ -7669,19 +8015,50 @@ function wireCheckoutPage(root) {
                     }
                 }
             }
-            // POST succeeded but no row visible for this account → wrong DB, wrong user, or client/parser drift.
             if (savedTransactionId == null && minePoll?.res?.ok && Array.isArray(minePoll.data) && minePoll.data.length === 0) {
-                alert(
-                    "The server accepted checkout, but your account still has no transactions. Usually: (1) the API is connected to a different MySQL than Workbench, (2) you’re not signed in as the buyer, or (3) checkout used a demo listing (sample:*), which never hits the database.",
+                showCheckoutError(
+                    root,
+                    `${escapeHtml("Checkout may have saved, but nothing shows on your account yet.")} <span class="d-block mt-1"><strong>Common causes:</strong> API pointed at a different database than you’re checking, wrong signed-in user, or a preview listing.</span>`,
                 );
                 return;
             }
+            try {
+                localStorage.setItem(CDM_CHECKOUT_PAYMENT_PREF_KEY, paymentMethod);
+            } catch {
+                /* ignore */
+            }
         } else {
-            // No numeric listing id → UI sample / stale context; cannot INSERT into transactions (FK).
-            alert(
-                "This item is a preview only (not in MySQL), so checkout cannot create a transaction row. Go to Home and open a listing posted by another student — it loads from the API and shows a listing #. Then confirm checkout.",
+            showCheckoutError(
+                root,
+                escapeHtml(
+                    "This item can’t be checked out here — open it from the live Home feed (a real listing with a number), then try again.",
+                ),
             );
             return;
+        }
+
+        let sellerUid =
+            ctx.sellerUserId != null && Number.isFinite(Number(ctx.sellerUserId)) ? Number(ctx.sellerUserId) : null;
+        if (sellerUid == null && postCheckoutPayload && typeof postCheckoutPayload === "object") {
+            const s = Number(
+                /** @type {Record<string, unknown>} */ (postCheckoutPayload).sellerId ??
+                    /** @type {Record<string, unknown>} */ (postCheckoutPayload).SellerId,
+            );
+            if (Number.isFinite(s) && s > 0) sellerUid = s;
+        }
+        const listingKeyForMsg =
+            ctx.key != null && String(ctx.key).trim()
+                ? String(ctx.key).trim()
+                : savedListingIdForTx != null
+                  ? `db:${savedListingIdForTx}`
+                  : "";
+        if (serverBacked && listingKeyForMsg && sellerUid != null && sellerUid > 0) {
+            ensureConversationForListing({
+                listingKey: listingKeyForMsg,
+                listingTitle: String(ctx.title || "Listing"),
+                sellerUserId: sellerUid,
+                sellerLabel: String(ctx.sellerDisplayName || "Seller"),
+            });
         }
 
         state.checkoutSuccess = {
@@ -7690,6 +8067,10 @@ function wireCheckoutPage(root) {
             serverBacked,
             transactionId: savedTransactionId,
             listingId: savedListingIdForTx,
+            paymentMethod: getSelectedPaymentMethod(),
+            listingKey: listingKeyForMsg,
+            sellerUserId: sellerUid,
+            sellerDisplayName: String(ctx.sellerDisplayName || "Seller"),
         };
         state.checkoutContext = null;
         state.view = "checkout-success";
@@ -7711,15 +8092,16 @@ function renderCheckout() {
     const listingIdNum = resolveNumericListingIdFromCheckoutContext(ctx);
     const persistServer = Number.isFinite(listingIdNum) && listingIdNum > 0;
     const signedInNoDbListing = Boolean(state.token && !persistServer);
+    const thumbAlt = escapeHtml(String(ctx.title || "Listing").trim()) || "Listing";
     const thumb =
         ctx.imageUrl && String(ctx.imageUrl).trim()
-            ? `<div class="cdm-checkout-thumb-wrap"><img alt="" src="${escapeHtml(String(ctx.imageUrl).trim())}" /></div>`
+            ? `<div class="cdm-checkout-thumb-wrap"><img alt="${thumbAlt}" src="${escapeHtml(String(ctx.imageUrl).trim())}" /></div>`
             : `<div class="cdm-checkout-thumb-wrap d-flex align-items-center justify-content-center text-muted small">No photo</div>`;
 
     const heroTitle = isSale ? "Checkout" : "Claim this item";
     const heroKicker = isSale
-        ? "Check your total, then confirm. You’re reusing dorm gear instead of feeding the May dumpster rush."
-        : "Seller chose donate / free. Confirm to save this claim. Same respect as a paid sale, zero platform fee.";
+        ? "Review your total, how you’ll pay the seller, then confirm. Pickup stays on campus — no shipping warehouse fantasy."
+        : "Confirm your free claim so the seller knows you’re coming. Same respect as a paid pickup.";
 
     const pickupUrgencyHtml = formatCheckoutPickupUrgencyHtml(ctx);
 
@@ -7750,26 +8132,40 @@ function renderCheckout() {
         </div>
     `;
 
-    const paymentSummaryNote = `
-        <div class="cdm-checkout-payment rounded-3 px-3 py-2 mb-3">
-            <strong>Pay the seller</strong> however you both agree: Venmo, Zelle, Cash App, or cash.
-            <span class="d-block small mt-1" style="color:#6e6e73;">Bama Marketplace doesn’t process payments in-app yet, so sort it in chat.</span>
+    const paymentChoiceHtml = isSale
+        ? `
+        <div class="cdm-checkout-pay-lead small text-muted mb-2">
+            <strong class="text-body">You pay the seller directly.</strong>
+            Bama Marketplace doesn’t charge your card or hold your money. Meet on campus and settle with cash or a peer app — we only save what you pick below for your receipt.
         </div>
-    `;
+        <fieldset class="mb-3 border-0 p-0" id="checkout-payment-fieldset" aria-describedby="checkout-payment-desc">
+            <legend class="form-label fw-semibold small mb-1">How you’ll pay (saved on your receipt)</legend>
+            <p class="small text-muted mb-2" id="checkout-payment-desc">This doesn’t run a charge — it records your plan for you and the seller.</p>
+            <div class="cdm-checkout-pay-tiles d-flex flex-column gap-2 mb-2">
+                <label class="cdm-checkout-pay-tile" for="checkout-pm-cash">
+                    <input class="visually-hidden" type="radio" name="checkout-payment" id="checkout-pm-cash" value="cash" checked />
+                    <span class="cdm-checkout-pay-tile-title">Cash at pickup</span>
+                    <span class="cdm-checkout-pay-tile-sub">Pay the seller when you meet</span>
+                </label>
+                <label class="cdm-checkout-pay-tile" for="checkout-pm-app">
+                    <input class="visually-hidden" type="radio" name="checkout-payment" id="checkout-pm-app" value="card" />
+                    <span class="cdm-checkout-pay-tile-title">Venmo, Zelle, Cash App</span>
+                    <span class="cdm-checkout-pay-tile-sub">Send to the seller outside this app</span>
+                </label>
+            </div>
+            <p class="small text-muted mb-0">Prefer to inspect first, then send app money — only when you’re comfortable. Watch for lookalike @handles.</p>
+        </fieldset>
+        <p class="small fw-semibold mb-3" id="checkout-payment-recap" aria-live="polite"></p>`
+        : `<p class="small text-muted mb-3 mb-lg-0">No payment for free items — confirm so the seller can expect you.</p>`;
 
     const saleDetailPanels = isSale
         ? `
             <div class="cdm-checkout-panel">
                 <h3>Price details</h3>
-                <p>
+                <p class="mb-0">
                     <strong>Your total</strong> is the list price; nothing extra is added at checkout.
                     Bama Marketplace still collects a <strong>7% marketplace fee</strong> on paid sales (it goes to the platform); it’s just not stacked on top of what you pay here.
                 </p>
-                <hr class="cdm-checkout-line" />
-                <div class="cdm-checkout-row">
-                    <span class="cdm-checkout-row-label">Total</span>
-                    <span class="cdm-checkout-row-value">${formatUsd(ctx.price)}</span>
-                </div>
             </div>
             <div class="cdm-checkout-panel">
                 <button
@@ -7802,33 +8198,44 @@ function renderCheckout() {
                     Donations and free listings get the same care as sales: seller’s choice, platform supports both equally.
                     You skip another retail run and give something a second life in the dorms.
                 </p>
-                <p class="mb-0">After you confirm, you’ll coordinate pickup in <strong>chat</strong> (opening soon). Post-meetup confirmation rules are still <strong>TBD</strong> for your team.</p>
+                <p class="mb-0">After you confirm, use <strong>Messages</strong> in this app to agree on pickup time and place with the seller.</p>
             </div>
         `;
 
     const storagePanel = `
-        <div class="cdm-checkout-panel">
-            <h3>Storage (optional)</h3>
-            <p>
-                The <strong>three-month gap</strong> (May move-out → August move-in) is exactly when good stuff gets tossed or stored.
-                If your school offers a storage path through Bama Marketplace, fees may depend on <strong>item size</strong> (larger = more space).
-            </p>
-            <p class="mb-0">
-                Rates and partners are <strong>TBD</strong>. When your campus turns this on, estimated storage cost will show here before you commit.
-            </p>
+        <div class="mb-3">
+            <button
+                class="cdm-checkout-disclosure-btn collapsed rounded-3 border bg-white px-3 py-2 shadow-sm"
+                style="border-color: rgba(0,0,0,0.08)"
+                type="button"
+                data-bs-toggle="collapse"
+                data-bs-target="#cdmCheckoutStorage"
+                aria-expanded="false"
+                aria-controls="cdmCheckoutStorage"
+            >
+                <span>Storage on campus (optional)</span>
+                <span class="cdm-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="collapse" id="cdmCheckoutStorage">
+                <div class="cdm-checkout-panel mt-2">
+                    <h3 class="h6">May → August gap</h3>
+                    <p class="mb-0 small">
+                        Lots of dorm gear gets tossed between move-out and move-in. If your campus adds storage partners through Bama Marketplace later, estimated costs can show here before you commit.
+                    </p>
+                </div>
+            </div>
         </div>
     `;
 
     const chatPanel = `
         <div class="cdm-checkout-panel">
-            <h3>Pickup &amp; safety</h3>
-            <p class="mb-0">In-app chat will connect you and the seller to agree on a time and place, usually a <strong>public spot</strong> on campus (lobby, designated meetup zone).</p>
+            <h3>Pickup &amp; Messages</h3>
+            <p class="mb-2">Use <strong>Messages</strong> (in this app) to agree on a <strong>public on-campus spot</strong> and time — same flow after you confirm.</p>
             <ul class="cdm-checkout-safety">
                 <li>Meet in daylight when you can; bring a friend if you prefer.</li>
-                <li>Don’t share your room number until you’re comfortable. Keep it to well-trafficked areas.</li>
-                <li>Use the payment note in your summary (Venmo, Zelle, etc.). Keep receipts in chat if you want proof.</li>
+                <li>Don’t share your room number until you’re comfortable.</li>
+                <li>Keep a quick paper trail in Messages if you pay with an app.</li>
             </ul>
-            <div class="cdm-chat-placeholder">Chat opens here after confirm (UI coming soon).</div>
         </div>
     `;
 
@@ -7838,13 +8245,13 @@ function renderCheckout() {
             <ol class="cdm-checkout-steps">
                 <li><strong>Confirm:</strong> ${
                     persistServer
-                        ? "we save this to your account and the listing is marked sold in the database."
+                        ? "this listing is reserved for you and hidden from other buyers."
                         : signedInNoDbListing
-                          ? "only runs for listings that exist in MySQL — go Home and open an item from the live feed (not a UI sample)."
-                          : "we add this to your Transactions list (demo: this browser only)."
+                          ? "open checkout from a live listing on Home (with a listing #) so we can complete the sale."
+                          : "we add a note to this browser until you sign in with a live listing."
                 }</li>
-                <li><strong>Chat:</strong> message the seller to lock in pickup; be specific about day/time.</li>
-                <li><strong>Handoff:</strong> meet up, inspect the item, done. Formal “received” / dispute flow is TBD.</li>
+                <li><strong>Messages:</strong> lock in pickup with the seller — day, time, and place.</li>
+                <li><strong>Handoff:</strong> meet, inspect the item, pay the way you agreed, done.</li>
             </ol>
         </div>
     `;
@@ -7853,17 +8260,34 @@ function renderCheckout() {
         ? `<div class="cdm-checkout-badge cdm-checkout-badge--warm">Campus sale · seller’s choice</div>`
         : `<div class="cdm-checkout-badge">Free · donated on Bama Marketplace</div>`;
 
+    const platformFee = isSale ? platformFeeFromSale(ctx.price) : 0;
+    const moneyBlockHtml = isSale
+        ? `<div class="cdm-checkout-money" role="group" aria-label="Price breakdown">
+            <div class="cdm-checkout-money-row">
+                <span class="cdm-checkout-money-label">List price</span>
+                <span class="cdm-checkout-money-amt">${formatUsd(ctx.price)}</span>
+            </div>
+            <div class="cdm-checkout-money-row cdm-checkout-money-row--muted">
+                <span class="cdm-checkout-money-label">Platform fee (7%, seller side)</span>
+                <span class="cdm-checkout-money-amt">${formatUsd(platformFee)}</span>
+            </div>
+            <p class="cdm-checkout-money-note small mb-2">This fee is not added to your total — you pay the list price to the seller.</p>
+            <div class="cdm-checkout-money-row cdm-checkout-money-row--total">
+                <span class="cdm-checkout-money-label">Total you pay</span>
+                <span class="cdm-checkout-money-amt">${formatUsd(ctx.price)}</span>
+            </div>
+        </div>`
+        : `<div class="cdm-checkout-money cdm-checkout-money--free" role="group" aria-label="Price">
+            <div class="cdm-checkout-money-row cdm-checkout-money-row--total">
+                <span class="cdm-checkout-money-label">Total you pay</span>
+                <span class="cdm-checkout-money-amt">${formatUsd(0)}</span>
+            </div>
+            <p class="cdm-checkout-money-note small mb-0">No platform fee on free claims.</p>
+        </div>`;
+
     const summaryTotalLine = isSale
-        ? `<div class="cdm-checkout-row align-items-center mt-3">
-               <span class="cdm-checkout-total mb-0">Total</span>
-               <span class="cdm-checkout-total mb-0">${formatUsd(ctx.price)}</span>
-           </div>
-           <p class="cdm-checkout-footnote mb-0">Tax isn’t shown in this preview. Payment is direct to seller (see note above).</p>`
-        : `<div class="cdm-checkout-row align-items-center mt-3">
-               <span class="cdm-checkout-total mb-0">Due today</span>
-               <span class="cdm-checkout-total mb-0">${formatUsd(0)}</span>
-           </div>
-           <p class="cdm-checkout-footnote mb-0">No 7% fee on free claims. Say thanks, show up on time.</p>`;
+        ? `<p class="cdm-checkout-footnote mb-0 mt-2">Tax isn’t shown in this preview. Payment is direct to seller (see note above).</p>`
+        : `<p class="cdm-checkout-footnote mb-0 mt-2">Say thanks, show up on time.</p>`;
 
     const shell = el(`
         <div class="cdm-shell cdm-checkout-shell">
@@ -7896,11 +8320,11 @@ function renderCheckout() {
             <div class="body-content cdm-body-content pb-5">
                 <div class="container-fluid cdm-checkout-max px-3 px-lg-4 pt-4 pb-5">
                     <button type="button" class="cdm-checkout-back mb-3" data-action="back-checkout">‹ ${isSale ? "Listing" : "Back"}</button>
-                    ${checkoutProgressHtml("review")}
+                    ${checkoutProgressHtml("checkout")}
                     ${
                         signedInNoDbListing
                             ? `<div class="alert alert-warning border-0 shadow-sm mb-3" role="alert">
-                        <strong>Not a database listing.</strong> Signed-in checkout only writes to MySQL when this page was opened from a <strong>real feed item</strong> (numeric listing id). Go back to Home — you should only see live rows while signed in.
+                        <strong>Preview listing.</strong> Go back to <strong>Home</strong> and open a real post from the feed so checkout can complete.
                     </div>`
                             : ""
                     }
@@ -7914,32 +8338,52 @@ function renderCheckout() {
                             <div class="cdm-checkout-summary cdm-checkout-summary--sticky">
                                 <h2>Order summary</h2>
                                 ${summaryBadge}
-                                ${paymentSummaryNote}
                                 <div class="cdm-checkout-row align-items-center">
                                     <div class="d-flex gap-3">
                                         ${thumb}
                                         <div>
                                             <div class="cdm-checkout-item-title">${escapeHtml(ctx.title)}</div>
-                                            <div class="small mt-1" style="color:#6e6e73;">Qty 1 · ${escapeHtml(ctx.sellerDisplayName)}</div>
+                                            <div class="small mt-1 d-flex align-items-center gap-2 flex-wrap cdm-checkout-seller-line">
+                                                <span class="text-muted">Qty 1</span>
+                                                <span class="d-inline-flex align-items-center gap-2">
+                                                    ${sellerMiniAvatarHtml(ctx.sellerDisplayName)}
+                                                    <span>Sold by <strong class="text-body fw-semibold">${escapeHtml(ctx.sellerDisplayName)}</strong></span>
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                     <div class="cdm-checkout-row-value">${isSale ? formatUsd(ctx.price) : formatUsd(0)}</div>
                                 </div>
                                 <hr class="cdm-checkout-line" />
+                                ${moneyBlockHtml}
+                                <hr class="cdm-checkout-line" />
+                                ${paymentChoiceHtml}
                                 ${summaryTotalLine}
+                                <div id="checkout-error-slot" class="checkout-error-slot"></div>
                                 <button type="button" class="btn cdm-btn-crimson cdm-checkout-cta" id="checkout-confirm-btn">
                                     ${isSale ? "Confirm purchase" : "Claim item"}
                                 </button>
                                 <button type="button" class="cdm-checkout-cta-secondary" data-action="back-checkout">Cancel</button>
-                                <p class="cdm-checkout-footnote mb-0">
+                                <p class="cdm-checkout-footnote mb-2">
+                                    By confirming you reserve this item. Coordinate pickup and payment with the seller in Messages.
+                                </p>
+                                <details class="small text-muted">
+                                    <summary class="user-select-none">Technical details</summary>
+                                    <p class="mb-1 mt-2">
+                                        ${
+                                            persistServer
+                                                ? "Signed-in checkout is saved to your account through the marketplace API."
+                                                : signedInNoDbListing
+                                                  ? "Checkout needs a live listing id from the feed."
+                                                  : "Without a signed-in live listing, history may stay in this browser only."
+                                        }
+                                    </p>
                                     ${
                                         persistServer
-                                            ? "Confirm writes to the database via <code>POST /api/transactions</code> (Heroku MySQL when deployed)."
-                                            : signedInNoDbListing
-                                              ? "Cannot write to MySQL without a real <code>listing_id</code>. Use Home → open a classmate’s post → confirm here."
-                                              : "Demo: saved in this browser only. Sign in and use a <strong>live feed listing</strong> for SQL-backed checkout."
+                                            ? `<p class="mb-0 font-monospace small">POST /api/transactions · listing_id ${escapeHtml(String(listingIdNum))}</p>`
+                                            : ""
                                     }
-                                </p>
+                                </details>
                             </div>
                         </div>
                         <div class="col-12 col-lg-7 order-2 order-lg-1">
@@ -7976,6 +8420,16 @@ function renderCheckoutSuccess() {
         return;
     }
 
+    const pmLabel = transactionPaymentMethodLabel(s.paymentMethod);
+    const saleRef =
+        s.transactionId != null
+            ? `<p class="small text-muted mb-3">Reference <span class="fw-semibold text-body">#${escapeHtml(String(s.transactionId))}</span> · ${escapeHtml(new Date().toLocaleString())}</p>`
+            : `<p class="small text-muted mb-3">${escapeHtml(new Date().toLocaleString())}</p>`;
+    const payLine =
+        s.isSale && s.paymentMethod
+            ? `<p class="small mb-3 text-start mx-auto" style="max-width: 22rem"><strong>Recorded:</strong> ${escapeHtml(pmLabel)} — confirm details with <strong>${escapeHtml(String(s.sellerDisplayName || "the seller"))}</strong> in Messages.</p>`
+            : `<p class="small mb-3 text-start mx-auto" style="max-width: 22rem">Next: message <strong>${escapeHtml(String(s.sellerDisplayName || "the seller"))}</strong> to schedule pickup.</p>`;
+
     const shell = el(`
         <div class="cdm-shell cdm-checkout-shell">
             <nav class="navbar navbar-expand-lg navbar-dark cdm-topbar cdm-navbar-top cdm-checkout-topbar">
@@ -8009,38 +8463,33 @@ function renderCheckoutSuccess() {
                     ${checkoutProgressHtml("success", true)}
                     <div class="cdm-checkout-success-card text-center mx-auto" style="max-width: 28rem">
                         <div class="cdm-checkout-success-icon mx-auto mb-3" aria-hidden="true">✓</div>
-                        <h1 class="cdm-checkout-hero-title mb-2">You’re in</h1>
-                        <p class="cdm-checkout-hero-kicker mx-auto mb-3">
-                            Your ${s.isSale ? "purchase" : "free claim"} of
-                            <span class="fw-semibold text-body">${escapeHtml(s.title)}</span> is saved.
+                        <h1 class="cdm-checkout-hero-title mb-2">You’re set</h1>
+                        <p class="cdm-checkout-hero-kicker mx-auto mb-2">
+                            ${s.isSale ? "Sale reserved" : "Claim saved"} for
+                            <span class="fw-semibold text-body">${escapeHtml(s.title)}</span>.
                             ${
                                 s.serverBacked
-                                    ? " It’s on your account in the database (see <strong>Transactions</strong>)."
-                                    : " <strong>Demo only</strong> — saved in this browser. Open a listing whose key starts with <code>db:</code> and confirm again to write to MySQL."
+                                    ? " It’s on your account — see <strong>Transactions</strong> anytime."
+                                    : " Saved on this device until you complete a signed-in checkout from the live feed."
                             }
-                            Next step: talk to the seller.
                         </p>
+                        ${saleRef}
+                        ${payLine}
                         ${
-                            s.serverBacked
-                                ? `<div class="alert alert-light border text-start small mb-4 mx-auto text-body" style="max-width: 26rem" role="status">
-                            <div class="fw-semibold mb-1">Saved to MySQL</div>
-                            ${
-                                s.transactionId != null
-                                    ? `<p class="mb-1">Use this to verify in Workbench: <code class="user-select-all">transaction_id = ${escapeHtml(String(s.transactionId))}</code>${
-                                          s.listingId != null
-                                              ? ` · <code class="user-select-all">listing_id = ${escapeHtml(String(s.listingId))}</code>`
-                                              : ""
-                                      }</p>
-                            <p class="mb-0 text-muted">Run <code class="small">SELECT * FROM transactions WHERE transaction_id = ${escapeHtml(String(s.transactionId))};</code> The empty row marked <code>*</code> in the grid is only for typing a <em>new</em> row — it is not your checkout.</p>`
-                                    : `<p class="mb-0 text-muted">Open <strong>Transactions</strong> in this app — the row is in the same database your API uses.</p>`
-                            }
-                        </div>`
+                            s.serverBacked && s.transactionId != null
+                                ? `<details class="text-start small text-muted mb-4 mx-auto" style="max-width: 26rem">
+                            <summary class="user-select-none">Developer / SQL check</summary>
+                            <p class="mb-1 mt-2 font-monospace small">transaction_id = ${escapeHtml(String(s.transactionId))}${
+                                      s.listingId != null ? ` · listing_id = ${escapeHtml(String(s.listingId))}` : ""
+                                  }</p>
+                            <p class="mb-0">Example: <code class="small">SELECT * FROM transactions WHERE transaction_id = ${escapeHtml(String(s.transactionId))};</code></p>
+                        </details>`
                                 : ""
                         }
-                        <button type="button" class="btn btn-outline-secondary w-100 rounded-pill py-2 mb-2" disabled id="checkout-success-chat">
-                            Open chat (coming soon)
+                        <button type="button" class="btn cdm-btn-crimson w-100 cdm-checkout-cta mb-2" id="checkout-success-message">
+                            Message seller
                         </button>
-                        <button type="button" class="btn cdm-btn-crimson w-100 cdm-checkout-cta mb-2" id="checkout-success-transactions">
+                        <button type="button" class="btn btn-outline-dark w-100 rounded-pill py-2 mb-2" id="checkout-success-transactions">
                             View my transactions
                         </button>
                         <button type="button" class="btn btn-link text-decoration-none" data-action="go-home">Continue shopping</button>
@@ -8053,6 +8502,26 @@ function renderCheckoutSuccess() {
     root.appendChild(shell);
     wireNav(shell);
     document.getElementById("checkout-success-transactions")?.addEventListener("click", () => navigateTransactions());
+    document.getElementById("checkout-success-message")?.addEventListener("click", () => {
+        const lid = s.listingId != null ? Number(s.listingId) : NaN;
+        const key =
+            s.listingKey != null && String(s.listingKey).trim()
+                ? String(s.listingKey).trim()
+                : Number.isFinite(lid) && lid > 0
+                  ? `db:${lid}`
+                  : "";
+        const sid = s.sellerUserId != null ? Number(s.sellerUserId) : NaN;
+        if (!key || !Number.isFinite(sid) || sid <= 0) {
+            navigateMessages();
+            return;
+        }
+        openMessagesForListing({
+            listingKey: key,
+            listingTitle: String(s.title || "Listing"),
+            sellerUserId: sid,
+            sellerLabel: String(s.sellerDisplayName || "Seller"),
+        });
+    });
     ensureAuthUi();
 }
 
@@ -8060,41 +8529,59 @@ function renderTransactions() {
     const root = document.getElementById("app");
     root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading transactions…</div></div>`;
     void (async () => {
-        let serverRows = [];
-        let apiOk = false;
+        let buyServer = [];
+        let sellServer = [];
+        let apiBuyOk = false;
+        let apiSellOk = false;
         if (state.token && !isJwtLikelyExpired(state.token)) {
-            const { res, data } = await apiJson("/api/transactions/mine?limit=48");
-            apiOk = res.ok;
-            if (res.status === 401 || res.status === 404) {
-                if (res.status === 401) {
-                    clearClientAuthSession();
+            const [mineRes, salesRes] = await Promise.all([
+                apiJson("/api/transactions/mine?limit=48"),
+                apiJson("/api/transactions/sales?limit=48"),
+            ]);
+            apiBuyOk = mineRes.res.ok;
+            apiSellOk = salesRes.res.ok;
+            if (mineRes.res.status === 401 || salesRes.res.status === 401) {
+                clearClientAuthSession();
+                apiBuyOk = false;
+                apiSellOk = false;
+            } else {
+                if (mineRes.res.ok && Array.isArray(mineRes.data)) {
+                    buyServer = mineRes.data.map((d) => mapServerTransactionToRow(d, "buy"));
                 }
-                apiOk = false;
-            } else if (res.ok && Array.isArray(data)) {
-                serverRows = data.map(mapServerTransactionToRow);
+                if (salesRes.res.ok && Array.isArray(salesRes.data)) {
+                    sellServer = salesRes.data.map((d) => mapServerTransactionToRow(d, "sell"));
+                }
             }
         } else if (state.token && isJwtLikelyExpired(state.token)) {
             clearClientAuthSession();
         }
         const localDemo = loadLocalTransactions().filter((t) => t.listingId == null);
-        const rows = [...serverRows, ...localDemo].sort(
-            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-        );
-        renderTransactionsMounted(rows, {
-            apiOk,
-            hasLocalDemo: localDemo.length > 0,
-            serverCount: serverRows.length,
+        renderTransactionsMounted({
+            buyRows: buyServer,
+            sellRows: sellServer,
+            localDemo,
+            apiBuyOk,
+            apiSellOk,
+            serverBuyCount: buyServer.length,
+            serverSellCount: sellServer.length,
         });
     })();
 }
 
-function renderTransactionsMounted(rows, opts) {
+function renderTransactionsMounted(opts) {
+    const { buyRows, sellRows, localDemo, apiBuyOk, apiSellOk, serverBuyCount, serverSellCount } = opts;
+    const mergedBuy = [...buyRows, ...localDemo].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+    const rows = state.txRole === "sell" ? sellRows : mergedBuy;
+
     const root = document.getElementById("app");
     root.innerHTML = "";
 
     if (rows.length === 0) {
         state.txFilter = "all";
     }
+    const isSellerTab = state.txRole === "sell";
     const nPurchase = rows.filter((r) => r.kind === "purchase").length;
     const nClaim = rows.filter((r) => r.kind === "claim").length;
     const nNeedsAction = rows.filter((r) => String(r.status).toLowerCase() === "awaiting_chat").length;
@@ -8113,7 +8600,7 @@ function renderTransactionsMounted(rows, opts) {
         <div class="cdm-tx-alert mb-3" role="status">
             <div class="cdm-tx-alert-title">${nNeedsAction} ${nNeedsAction === 1 ? "thing needs" : "things need"} your attention</div>
             <p class="cdm-tx-alert-body mb-0">
-                Big-box order pages show package tracking. Here it’s <strong>you + another student</strong> on campus. Chat isn’t live yet, so use <strong>View listing</strong> for now. Pay with Venmo / Zelle / cash when you agree.
+                Use <strong>Messages</strong> to lock in pickup and how you’ll pay. Meet on campus in a <strong>public spot</strong>. ${isSellerTab ? "Buyers see the payment method they saved on checkout." : ""}
             </p>
         </div>
     `
@@ -8128,6 +8615,13 @@ function renderTransactionsMounted(rows, opts) {
             ${nPurchase ? `<span class="cdm-tx-stat-pill">${nPurchase} paid</span>` : ""}
             ${nClaim ? `<span class="cdm-tx-stat-pill">${nClaim} free</span>` : ""}
             ${nNeedsAction ? `<span class="cdm-tx-stat-pill cdm-tx-stat-pill--pulse">${nNeedsAction} need you</span>` : ""}
+        </div>
+    `;
+
+    const roleTabs = `
+        <div class="cdm-tx-role-tabs cdm-tx-role-tabs--segmented mb-3" role="group" aria-label="Purchases or sales">
+            <button type="button" class="btn btn-sm ${state.txRole === "buy" ? "btn-dark" : "btn-outline-dark"}" data-action="tx-set-role" data-tx-role="buy">Purchases</button>
+            <button type="button" class="btn btn-sm ${state.txRole === "sell" ? "btn-dark" : "btn-outline-dark"}" data-action="tx-set-role" data-tx-role="sell">Sales</button>
         </div>
     `;
 
@@ -8152,7 +8646,7 @@ function renderTransactionsMounted(rows, opts) {
         <div class="cdm-tx-tip mb-4">
             <div class="cdm-tx-tip-title">How Bama Marketplace is different</div>
             <p class="cdm-tx-tip-body mb-0">
-                No trucks, no warehouse: just <strong>campus pickup</strong> and DMs. Bama Marketplace’s <strong>7%</strong> goes to the <strong>platform</strong>, not added on top of your total. Sellers can <strong>sell or donate</strong>; you always see both the same way here.
+                No trucks, no warehouse: just <strong>campus pickup</strong> and <strong>Messages</strong>. The <strong>7% platform fee</strong> comes from the seller side — not stacked on your list price at checkout. Payment happens <strong>between students</strong> (cash or Venmo / Zelle / Cash App).
             </p>
         </div>
     `;
@@ -8165,16 +8659,19 @@ function renderTransactionsMounted(rows, opts) {
         </div>
     `;
 
-    let emptyLead =
-        "Your <strong>buys</strong> and <strong>free claims</strong> show up here after checkout — same flow for sold or donated items.";
-    if (rows.length === 0 && state.token && opts.apiOk) {
-        emptyLead =
-            "No transactions on your account yet. Check out a <strong>live feed</strong> listing (not the sample cards) to save to the database.";
-    } else if (rows.length === 0 && state.token && !opts.apiOk) {
-        emptyLead = "Couldn’t load transactions from the API. Check that the backend is running and your session is valid.";
+    let emptyLead = isSellerTab
+        ? "When someone buys or claims your listings, <strong>sales</strong> show up here with the buyer’s name and how they plan to pay."
+        : "Your <strong>buys</strong> and <strong>free claims</strong> show up here after checkout.";
+    if (rows.length === 0 && state.token && (isSellerTab ? apiSellOk : apiBuyOk)) {
+        emptyLead = isSellerTab
+            ? "No sales on your account yet — when a buyer completes checkout on your listing, it appears here."
+            : "No purchases yet. Open a <strong>live feed</strong> listing and confirm checkout.";
+    } else if (rows.length === 0 && state.token && !(isSellerTab ? apiSellOk : apiBuyOk)) {
+        emptyLead = isSellerTab
+            ? "Couldn’t load sales (this API may need an update — <code>GET /api/transactions/sales</code>)."
+            : "Couldn’t load purchases from the API. Check that the backend is running and your session is valid.";
     } else if (rows.length === 0 && !state.token) {
-        emptyLead =
-            "<strong>Sign in</strong> to load purchases from the server. Sample / demo checkouts stay in this browser only.";
+        emptyLead = "<strong>Sign in</strong> to load purchases and sales from the server.";
     }
     const emptyHtml = `
         <div class="cdm-tx-empty text-center py-5 px-3">
@@ -8207,12 +8704,13 @@ function renderTransactionsMounted(rows, opts) {
                 const kindBadge = isPurchase
                     ? `<span class="cdm-tx-kind cdm-tx-kind--sale">Paid</span>`
                     : `<span class="cdm-tx-kind cdm-tx-kind--claim">Free</span>`;
-                const statusText = escapeHtml(transactionStatusLabel(t.status));
+                const isSellerView = t.txRole === "sell";
+                const statusText = escapeHtml(transactionStatusLabel(t.status, isSellerView));
                 const statusClass =
                     String(t.status).toLowerCase() === "completed"
                         ? "cdm-tx-status cdm-tx-status--done"
                         : "cdm-tx-status";
-                const headline = transactionStatusHeadline(t.status, t.kind);
+                const headline = transactionStatusHeadline(t.status, t.kind, isSellerView);
                 const rel = formatRelativeTimeShort(t.createdAt);
                 const abs = escapeHtml(formatSavedAt(t.createdAt));
                 const timeLine = rel ? `<span class="cdm-tx-rel">${escapeHtml(rel)}</span> · ${abs}` : abs;
@@ -8224,15 +8722,43 @@ function renderTransactionsMounted(rows, opts) {
                         ? `<div class="cdm-tx-ref">${refBits.join(" · ")}</div>`
                         : "";
                 const thumb = transactionThumbEmoji(t.title);
-                const priceLine = isPurchase
-                    ? `<div class="cdm-tx-total-pill">${formatUsd(t.listPrice)} <span class="cdm-tx-total-sub">total</span></div>`
-                    : `<div class="cdm-tx-total-pill cdm-tx-total-pill--free">$0 <span class="cdm-tx-total-sub">claim</span></div>`;
-                const feeNote = isPurchase
-                    ? `<p class="cdm-tx-footnote mb-0 mt-2">7% to Bama Marketplace on this sale (not added on top of what you paid).</p>`
-                    : `<p class="cdm-tx-footnote mb-0 mt-2">No fee. Say thanks when you meet up.</p>`;
+                const moneyBlockHtml = isPurchase ? transactionPurchaseMoneyHtml(t, isSellerView) : transactionClaimMoneyHtml();
+                const payChip = isPurchase ? transactionPaymentChipHtml(t.paymentMethod) : "";
+                const buyerLine =
+                    isSellerView && (t.buyerDisplayName || t.buyerUserId)
+                        ? `<div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
+                                ${sellerMiniAvatarHtml(t.buyerDisplayName || `User ${t.buyerUserId}`)}
+                                <span>Buyer: <span class="text-body fw-medium">${escapeHtml(String(t.buyerDisplayName || (t.buyerUserId ? `User #${t.buyerUserId}` : "Buyer")))}</span></span>
+                            </div>`
+                        : "";
+                const sellerLine =
+                    !isSellerView && (t.sellerDisplayName || t.sellerUserId)
+                        ? `<div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
+                                ${sellerMiniAvatarHtml(t.sellerDisplayName || "Seller")}
+                                <span>Seller: <span class="text-body fw-medium">${escapeHtml(String(t.sellerDisplayName || (t.sellerUserId ? `User #${t.sellerUserId}` : "Seller")))}</span></span>
+                            </div>`
+                        : "";
                 const listingBtn =
                     t.listingKey && String(t.listingKey).trim()
                         ? `<button type="button" class="btn btn-sm cdm-btn-crimson rounded-pill px-3" data-action="tx-open-listing" data-listing-key="${escapeHtml(String(t.listingKey).trim())}">View listing</button>`
+                        : "";
+                const msgSellerBtn =
+                    !isSellerView &&
+                    t.sellerUserId != null &&
+                    Number.isFinite(Number(t.sellerUserId)) &&
+                    Number(t.sellerUserId) > 0 &&
+                    t.listingKey &&
+                    String(t.listingKey).trim()
+                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="tx-msg-seller" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey).trim())}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}" data-seller-id="${escapeAttrForDoubleQuoted(String(t.sellerUserId))}" data-seller-name="${escapeAttrForDoubleQuoted(String(t.sellerDisplayName || "Seller"))}">Message seller</button>`
+                        : "";
+                const msgBuyerBtn =
+                    isSellerView &&
+                    t.buyerUserId != null &&
+                    Number.isFinite(Number(t.buyerUserId)) &&
+                    Number(t.buyerUserId) > 0 &&
+                    t.listingKey &&
+                    String(t.listingKey).trim()
+                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="tx-msg-buyer" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey).trim())}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}" data-buyer-id="${escapeAttrForDoubleQuoted(String(t.buyerUserId))}" data-buyer-name="${escapeAttrForDoubleQuoted(String(t.buyerDisplayName || "Buyer"))}">Message buyer</button>`
                         : "";
                 return `
             <article class="cdm-tx-card mb-3">
@@ -8242,17 +8768,19 @@ function renderTransactionsMounted(rows, opts) {
                     <div class="flex-grow-1 min-w-0">
                         <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-1">
                             <h2 class="cdm-tx-card-title h6 mb-0">${escapeHtml(t.title)}</h2>
-                            <div class="d-flex flex-wrap gap-2 align-items-center">${kindBadge}<span class="${statusClass}">${statusText}</span></div>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">${kindBadge}${payChip ? ` ${payChip}` : ""}<span class="${statusClass}">${statusText}</span></div>
                         </div>
+                        ${sellerLine}
+                        ${buyerLine}
                         <div class="cdm-tx-meta">${timeLine}</div>
                         ${refLine}
-                        <div class="d-flex flex-wrap align-items-center gap-2 mt-2">${priceLine}</div>
-                        ${feeNote}
+                        ${moneyBlockHtml}
                     </div>
                 </div>
                 <div class="cdm-tx-actions d-flex flex-wrap gap-2 mt-3 pt-3">
                     ${listingBtn}
-                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill" disabled title="Coming soon">Open chat</button>
+                    ${msgSellerBtn}
+                    ${msgBuyerBtn}
                 </div>
             </article>
         `;
@@ -8261,7 +8789,7 @@ function renderTransactionsMounted(rows, opts) {
     }
 
     const footerTools =
-        opts.hasLocalDemo
+        localDemo.length > 0
             ? `<p class="text-center mt-4 mb-0">
                 <button type="button" class="btn btn-link btn-sm text-muted text-decoration-none" data-action="clear-local-transactions">Clear demo history (this browser only)</button>
             </p>`
@@ -8290,6 +8818,7 @@ function renderTransactionsMounted(rows, opts) {
                         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
                             <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
                             <li class="nav-item"><a class="nav-link active" href="#" aria-current="page">Transactions</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="nav-messages">Messages</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="my-listings">My listings</a></li>
                             <li class="nav-item"><a class="nav-link" href="#" data-action="post-item">Post an item</a></li>
                         </ul>
@@ -8304,19 +8833,30 @@ function renderTransactionsMounted(rows, opts) {
                             <p class="cdm-tx-eyebrow mb-1">Your campus activity</p>
                             <h1 class="cdm-checkout-hero-title mb-1">Transactions</h1>
                             <p class="cdm-checkout-hero-kicker mb-0">
-                                Your <strong>paid buys</strong> and <strong>free claims</strong> in one place, built for <strong>peer pickup</strong> on campus, not shipping labels and warehouses.
+                                <strong>Purchases</strong> you’ve made and <strong>sales</strong> on your listings — campus pickup, settle with the other person outside the app.
                             </p>
                         </div>
                     </div>
                     <p class="cdm-tx-demo-note small mb-3">
                         ${
-                            opts.serverCount > 0
-                                ? `<strong>${opts.serverCount}</strong> from your account${opts.hasLocalDemo ? " · plus demo rows in this browser" : ""}.`
-                                : state.token
-                                  ? "Server-backed rows appear after you check out a <strong>live listing</strong>. Demo sample cards stay in this browser."
-                                  : "Sign in to sync with the database. Demo checkouts (sample feed) stay in this browser."
+                            state.txRole === "sell"
+                                ? serverSellCount > 0
+                                    ? `<strong>${serverSellCount}</strong> sale${serverSellCount === 1 ? "" : "s"} from the server.`
+                                    : state.token
+                                      ? apiSellOk
+                                        ? "No server sales yet."
+                                        : "Sales list unavailable — deploy the latest API for <code>GET /api/transactions/sales</code>."
+                                      : "Sign in to load your sales."
+                                : serverBuyCount > 0
+                                  ? `<strong>${serverBuyCount}</strong> purchase${serverBuyCount === 1 ? "" : "s"} from the server${localDemo.length ? " · plus demo rows in this browser" : ""}.`
+                                  : state.token
+                                    ? apiBuyOk
+                                      ? "No server purchases yet — check out a live listing."
+                                      : "Couldn’t load purchases from the API."
+                                    : "Sign in to sync purchases. Demo rows may stay in this browser."
                         }
                     </p>
+                    ${roleTabs}
                     ${quickNav}
                     ${needsActionBanner}
                     ${statsHtml}
