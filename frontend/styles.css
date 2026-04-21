@@ -553,6 +553,14 @@ button.cdm-chip {
     backdrop-filter: blur(1px);
 }
 
+/* Admin: highlight ratee rows on probation */
+.cdm-probation-row td {
+  background: rgba(239, 68, 68, 0.10) !important;
+}
+.cdm-probation-row:hover td {
+  background: rgba(239, 68, 68, 0.14) !important;
+}
+
 .cdm-photo-thumb {
     width: 56px;
     height: 56px;

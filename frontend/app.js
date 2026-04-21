@@ -4750,6 +4750,7 @@ async function renderAdminDashboard() {
               .slice(0, 100)
               .map((r) => {
                   const score = Number(r.score ?? 0);
+                  const raterId = Number(r.raterId ?? r.RaterId ?? 0);
                   const rateeId = Number(r.rateeId ?? r.RateeId ?? 0);
                   const onProb = Boolean(r.rateeOnProbation ?? r.RateeOnProbation);
                   const tags = [
@@ -4769,10 +4770,11 @@ async function renderAdminDashboard() {
                       : onProb
                         ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-admin-probation-ratee="${rateeId}" data-admin-probation-set="0">Clear probation</button>`
                         : `<button type="button" class="btn btn-sm btn-outline-warning" data-admin-probation-ratee="${rateeId}" data-admin-probation-set="1">Probation</button>`;
-                  return `<tr>
-                    <td>${escapeHtml(String(r.ratingId ?? ""))}</td>
+                  const probationRowClass = onProb ? "cdm-probation-row" : "";
+                  return `<tr class="${probationRowClass}">
+                    <td>${escapeHtml(String(rateeId || ""))}</td>
                     <td>${escapeHtml(String(r.listingId ?? ""))}</td>
-                    <td>${escapeHtml(String(r.rateeId ?? ""))}</td>
+                    <td>${escapeHtml(String(raterId || ""))}</td>
                     <td class="text-end">${score}</td>
                     <td>${escapeHtml(tags)}</td>
                     <td class="cdm-muted small" style="max-width: 14rem">${escapeHtml(String(r.comment ?? ""))}</td>
@@ -4963,7 +4965,7 @@ async function renderAdminDashboard() {
                   <p class="cdm-muted small mb-2">Flagged, harsh, or very low star ratings (all time).</p>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0" id="admin-flagged-reviews-table">
-                      <thead><tr><th>ID</th><th>Listing</th><th>Ratee</th><th class="text-end">★</th><th>Tags</th><th>Comment</th><th>Actions</th></tr></thead>
+                      <thead><tr><th>Seller ID</th><th>Listing</th><th>Rater ID</th><th class="text-end">★</th><th>Tags</th><th>Comment</th><th>Actions</th></tr></thead>
                       <tbody>${flaggedRows}</tbody>
                     </table>
                   </div>
