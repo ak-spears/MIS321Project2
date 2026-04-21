@@ -45,9 +45,9 @@ public sealed class ListingsController : ControllerBase
             limit = 24;
         }
 
-        if (limit > 250)
+        if (limit > 2000)
         {
-            limit = 250;
+            limit = 2000;
         }
 
         int? excludeSellerId = null;

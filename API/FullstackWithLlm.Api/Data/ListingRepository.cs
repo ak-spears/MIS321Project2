@@ -87,8 +87,10 @@ public sealed class ListingRepository
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
-            WHERE l.status = 'active'
+            WHERE l.status IN ('active', 'claimed')
               AND l.price > 0
+              AND l.image_url IS NOT NULL
+              AND TRIM(l.image_url) <> ''
               AND (@campus_id IS NULL OR l.campus_id = @campus_id)
               AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
             ORDER BY l.created_at DESC
@@ -133,8 +135,10 @@ public sealed class ListingRepository
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
-            WHERE l.status = 'active'
+            WHERE l.status IN ('active', 'claimed')
               AND l.price > 0
+              AND l.image_url IS NOT NULL
+              AND TRIM(l.image_url) <> ''
               AND (@campus_id IS NULL OR l.campus_id = @campus_id)
               AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
             ORDER BY l.created_at DESC
@@ -157,7 +161,7 @@ public sealed class ListingRepository
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
-            WHERE l.status = 'active'
+            WHERE l.status IN ('active', 'claimed')
               AND l.price > 0
               AND (@campus_id IS NULL OR l.campus_id = @campus_id)
               AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
@@ -1138,7 +1142,26 @@ public sealed class ListingRepository
         int listingId,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        const string sqlWithImageUrl = """
+            SELECT
+                l.listing_id,
+                l.seller_id,
+                l.title,
+                l.description,
+                l.price,
+                l.category,
+                CAST(0 AS UNSIGNED) AS or_best_offer,
+                l.image_url,
+                l.status,
+                NULLIF(l.created_at, '0000-00-00 00:00:00') AS created_at,
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
+            FROM listings l
+            INNER JOIN users u ON u.user_id = l.seller_id
+            WHERE l.listing_id = @id
+            LIMIT 1;
+            """;
+
+        const string sqlNoImageUrl = """
             SELECT
                 l.listing_id,
                 l.seller_id,
@@ -1157,40 +1180,52 @@ public sealed class ListingRepository
             LIMIT 1;
             """;
 
-        await using var cmd = new MySqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@id", listingId);
-
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+        async Task<ListingDetailDto?> ReadAsync(string sql)
         {
-            return null;
+            await using var cmd = new MySqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@id", listingId);
+
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            var ordObo = reader.GetOrdinal("or_best_offer");
+            return new ListingDetailDto
+            {
+                ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
+                SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
+                Title = reader.GetString(reader.GetOrdinal("title")),
+                Description = reader.IsDBNull(reader.GetOrdinal("description"))
+                    ? null
+                    : reader.GetString(reader.GetOrdinal("description")),
+                Price = reader.GetDecimal(reader.GetOrdinal("price")),
+                Category = reader.IsDBNull(reader.GetOrdinal("category")) ? null : reader.GetString(reader.GetOrdinal("category")),
+                Condition = null,
+                Dimensions = null,
+                GapSolution = null,
+                StorageNotes = null,
+                PickupStart = null,
+                PickupEnd = null,
+                PickupLocation = null,
+                DeliveryNotes = null,
+                SpaceSuitability = null,
+                OrBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo)),
+                ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
+                Status = reader.GetString(reader.GetOrdinal("status")),
+                SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
+                CreatedAt = reader.IsDBNull(reader.GetOrdinal("created_at")) ? null : reader.GetDateTime(reader.GetOrdinal("created_at")),
+            };
         }
 
-        var ordObo = reader.GetOrdinal("or_best_offer");
-        return new ListingDetailDto
+        try
         {
-            ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
-            SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
-            Title = reader.GetString(reader.GetOrdinal("title")),
-            Description = reader.IsDBNull(reader.GetOrdinal("description"))
-                ? null
-                : reader.GetString(reader.GetOrdinal("description")),
-            Price = reader.GetDecimal(reader.GetOrdinal("price")),
-            Category = reader.IsDBNull(reader.GetOrdinal("category")) ? null : reader.GetString(reader.GetOrdinal("category")),
-            Condition = null,
-            Dimensions = null,
-            GapSolution = null,
-            StorageNotes = null,
-            PickupStart = null,
-            PickupEnd = null,
-            PickupLocation = null,
-            DeliveryNotes = null,
-            SpaceSuitability = null,
-            OrBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo)),
-            ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
-            Status = reader.GetString(reader.GetOrdinal("status")),
-            SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
-            CreatedAt = reader.IsDBNull(reader.GetOrdinal("created_at")) ? null : reader.GetDateTime(reader.GetOrdinal("created_at")),
-        };
+            return await ReadAsync(sqlWithImageUrl);
+        }
+        catch (MySqlException mx) when (mx.Number == 1054)
+        {
+            return await ReadAsync(sqlNoImageUrl);
+        }
     }
 }
