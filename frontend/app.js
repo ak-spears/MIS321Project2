@@ -828,8 +828,11 @@ function homeFeedCardHtml(item) {
             aria-pressed="${saved ? "true" : "false"}"
             title="${saved ? "Unsave" : "Save"}"
         >${saved ? "★" : "☆"}</button>`;
-    const thumbImg = item.photoDataUrl
-        ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+    // Prefer rendering the image `src` directly. (Hydration via state/feed map is still used elsewhere,
+    // but we don't want blank thumbs if hydration fails or is delayed.)
+    const thumbSrc = item.photoDataUrl ? escapeAttrForDoubleQuoted(item.photoDataUrl) : "";
+    const thumbImg = thumbSrc
+        ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${thumbSrc}" />`
         : "";
     const condRaw = item.condition != null && String(item.condition).trim() !== "" ? item.condition : null;
     const condLine = condRaw

@@ -117,7 +117,31 @@ public sealed class ListingRepository
         int? excludeSellerId,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        const string sqlWithImageUrl = """
+            SELECT
+                l.listing_id,
+                l.seller_id,
+                l.campus_id,
+                l.title,
+                l.description,
+                l.price,
+                l.category,
+                CAST(0 AS UNSIGNED) AS or_best_offer,
+                l.image_url,
+                l.status,
+                l.created_at,
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
+            FROM listings l
+            INNER JOIN users u ON u.user_id = l.seller_id
+            WHERE l.status = 'active'
+              AND l.price > 0
+              AND (@campus_id IS NULL OR l.campus_id = @campus_id)
+              AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
+            ORDER BY l.created_at DESC
+            LIMIT @limit;
+            """;
+
+        const string sqlNoImageUrl = """
             SELECT
                 l.listing_id,
                 l.seller_id,
@@ -140,20 +164,31 @@ public sealed class ListingRepository
             ORDER BY l.created_at DESC
             LIMIT @limit;
             """;
-
-        await using var cmd = new MySqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@limit", limit);
-        cmd.Parameters.AddWithValue("@campus_id", campusId.HasValue ? campusId.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@exclude_seller_id", excludeSellerId.HasValue ? excludeSellerId.Value : DBNull.Value);
-
-        var list = new List<ListingFeedItemDto>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        async Task<IReadOnlyList<ListingFeedItemDto>> ReadAsync(string sql)
         {
-            list.Add(MapFeedRowMinimal(reader));
+            await using var cmd = new MySqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@limit", limit);
+            cmd.Parameters.AddWithValue("@campus_id", campusId.HasValue ? campusId.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@exclude_seller_id", excludeSellerId.HasValue ? excludeSellerId.Value : DBNull.Value);
+
+            var list = new List<ListingFeedItemDto>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                list.Add(MapFeedRowMinimal(reader));
+            }
+
+            return list;
         }
 
-        return list;
+        try
+        {
+            return await ReadAsync(sqlWithImageUrl);
+        }
+        catch (MySqlException mx) when (mx.Number == 1054)
+        {
+            return await ReadAsync(sqlNoImageUrl);
+        }
     }
 
     public async Task<IReadOnlyList<ListingFeedItemDto>> GetMineAsync(
@@ -241,7 +276,29 @@ public sealed class ListingRepository
         int limit,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        const string sqlWithImageUrl = """
+            SELECT
+                l.listing_id,
+                l.seller_id,
+                l.campus_id,
+                l.title,
+                l.description,
+                l.price,
+                l.category,
+                CAST(0 AS UNSIGNED) AS or_best_offer,
+                l.image_url,
+                l.status,
+                l.created_at,
+                SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
+            FROM listings l
+            INNER JOIN users u ON u.user_id = l.seller_id
+            WHERE l.seller_id = @seller_id
+              AND l.status <> 'removed'
+            ORDER BY l.created_at DESC
+            LIMIT @limit;
+            """;
+
+        const string sqlNoImageUrl = """
             SELECT
                 l.listing_id,
                 l.seller_id,
@@ -262,19 +319,30 @@ public sealed class ListingRepository
             ORDER BY l.created_at DESC
             LIMIT @limit;
             """;
-
-        await using var cmd = new MySqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@seller_id", sellerId);
-        cmd.Parameters.AddWithValue("@limit", limit);
-
-        var list = new List<ListingFeedItemDto>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        async Task<IReadOnlyList<ListingFeedItemDto>> ReadAsync(string sql)
         {
-            list.Add(MapFeedRowMinimal(reader));
+            await using var cmd = new MySqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@seller_id", sellerId);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            var list = new List<ListingFeedItemDto>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                list.Add(MapFeedRowMinimal(reader));
+            }
+
+            return list;
         }
 
-        return list;
+        try
+        {
+            return await ReadAsync(sqlWithImageUrl);
+        }
+        catch (MySqlException mx) when (mx.Number == 1054)
+        {
+            return await ReadAsync(sqlNoImageUrl);
+        }
     }
 
     private static ListingFeedItemDto MapFeedRowWithGap(
