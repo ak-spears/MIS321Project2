@@ -680,6 +680,7 @@ const categoryLabel = {
     storage: "Storage / organizers",
     lighting: "Lighting",
     textbooks: "Textbooks",
+    clothing: "Clothing",
     other: "Other",
 };
 
@@ -721,6 +722,7 @@ function listingMatchesCategoryChips(/** @type {string | null} */ slug, /** @typ
         if (c === "cookware" && slug === "cookware") return true;
         if (c === "decor" && slug === "decor") return true;
         if (c === "electronics" && slug === "electronics") return true;
+        if (c === "clothing" && slug === "clothing") return true;
         if (c === "other" && slug === "other") return true;
         if ((c === "mini_fridge" || c === "microwave") && slug === "appliance") return true;
     }
@@ -3060,6 +3062,7 @@ function listingCategorySelectOptionsHtml() {
         <option value="cookware">Cookware & cooking supplies</option>
         <option value="decor">Decor</option>
         <option value="electronics">Electronics</option>
+        <option value="clothing">Clothing</option>
         <option value="other">Other</option>
     `;
 }
@@ -4818,7 +4821,7 @@ async function renderAdminDashboard() {
             <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3">
               <div>
                 <h1 class="h3 cdm-title mb-1">Admin dashboard</h1>
-                <p class="cdm-muted small mb-0">Activity and money in the marketplace, then trust-and-safety lists. Weeks start on Monday (UTC date from the server).</p>
+                
               </div>
               <div class="d-flex flex-column align-items-stretch align-items-md-end gap-1">
                 <label class="small cdm-muted mb-0" for="admin-weeks-select">Time range</label>
@@ -4942,7 +4945,7 @@ async function renderAdminDashboard() {
                       <div class="cdm-muted small">Not picked up</div>
                     </div>
                   </div>
-                  <div class="cdm-muted small mt-3">Uses <code>listings.donation_handed_off_at</code> when present.</div>
+                  
                 </div>
               </div>
 
@@ -4969,7 +4972,7 @@ async function renderAdminDashboard() {
                       <tbody>${flaggedRows}</tbody>
                     </table>
                   </div>
-                  <div class="cdm-muted small mt-3">Probation uses <code>users.on_probation</code> (run <code>database/alter_users_on_probation.sql</code>). Flag signals need <code>ratings.is_flagged</code> / <code>ratings.is_harsh</code>.</div>
+                  
                 </div>
               </div>
             </div>
@@ -5212,6 +5215,7 @@ function buildHomeFiltersHtml() {
         ["cookware", categoryLabel.cookware],
         ["decor", categoryLabel.decor],
         ["electronics", categoryLabel.electronics],
+        ["clothing", categoryLabel.clothing],
         ["furniture", categoryLabel.furniture],
         ["storage", categoryLabel.storage],
         ["lighting", categoryLabel.lighting],
@@ -5441,6 +5445,9 @@ async function renderHome() {
                             </button>
                             <button type="button" class="cdm-chip" data-feed-chip="electronics" aria-pressed="false">
                                 🔌 Electronics
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="clothing" aria-pressed="false">
+                                👕 Clothing
                             </button>
                         </div>
                     </div>
@@ -8419,15 +8426,7 @@ function renderCheckout() {
                                     ${isSale ? "Confirm purchase" : "Claim item"}
                                 </button>
                                 <button type="button" class="cdm-checkout-cta-secondary" data-action="back-checkout">Cancel</button>
-                                <p class="cdm-checkout-footnote mb-0">
-                                    ${
-                                        persistServer
-                                            ? "Confirm writes to the database via <code>POST /api/transactions</code> (Heroku MySQL when deployed)."
-                                            : signedInNoDbListing
-                                              ? "Cannot write to MySQL without a real <code>listing_id</code>. Use Home → open a classmate’s post → confirm here."
-                                              : "Demo: saved in this browser only. Sign in and use a <strong>live feed listing</strong> for SQL-backed checkout."
-                                    }
-                                </p>
+                                
                             </div>
                         </div>
                         <div class="col-12 col-lg-7 order-2 order-lg-1">
@@ -9205,8 +9204,12 @@ function renderMessages() {
                   const isActive = active && active.id === row.id;
                   const last = row.messages && row.messages.length ? row.messages[row.messages.length - 1] : null;
                   const preview = last ? escapeHtml(String(last.text || "").slice(0, 68)) : "No messages yet";
+                  const deleteBtn = `<button type="button" class="btn btn-sm ${isActive ? "btn-outline-light" : "btn-outline-danger"} rounded-pill px-2 py-0" data-action="delete-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}" title="Delete chat">✕</button>`;
                   return `<button type="button" class="list-group-item list-group-item-action ${isActive ? "active" : ""}" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}">
-                        <div class="fw-semibold">${escapeHtml(otherLabel)}</div>
+                        <div class="d-flex align-items-center justify-content-between gap-2">
+                          <div class="fw-semibold text-truncate">${escapeHtml(otherLabel)}</div>
+                          <div class="flex-shrink-0">${deleteBtn}</div>
+                        </div>
                         <div class="small ${isActive ? "text-white-50" : "text-muted"}">${escapeHtml(row.listingTitle || "Listing")}</div>
                         <div class="small ${isActive ? "text-white-50" : "text-muted"} text-truncate">${preview}</div>
                     </button>`;
@@ -9301,6 +9304,24 @@ function renderMessages() {
             if (!id) return;
             state.messagesActiveConversationId = id;
             markConversationRead(id);
+            renderMessages();
+        });
+    });
+
+    shell.querySelectorAll("[data-action='delete-message-thread']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const id = btn.getAttribute("data-conversation-id");
+            if (!id) return;
+            if (!confirm("Delete this chat? This only deletes it from this browser.")) return;
+            const rows = getStoredConversations();
+            const next = rows.filter((r) => r.id !== id);
+            setStoredConversations(next);
+            if (state.messagesActiveConversationId === id) {
+                state.messagesActiveConversationId = next[0]?.id || null;
+            }
+            syncMessagesUnreadBadges(document);
             renderMessages();
         });
     });
