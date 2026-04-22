@@ -43,7 +43,7 @@ title, category, condition, listingType, price, gapSolution, description, dimens
 cropLeft, cropTop, cropWidth, cropHeight
 
 Rules:
-- category must be one of: bedding, appliance, cookware, decor, electronics, furniture, storage, lighting, textbooks, other
+- category must be one of: bedding, appliance, cookware, decor, electronics, furniture, storage, lighting, textbooks, clothing, other
 - condition must be one of: new, like_new, good, fair
 - listingType must be one of: sell, donate
 - if listingType is donate, price must be 0
@@ -89,7 +89,7 @@ cropLeft, cropTop, cropWidth, cropHeight
 Rules:
 - Put ONE object per distinct item. Minimum 1 listing, maximum 12.
 - If the photo is really a single item, return listings with length 1.
-- category must be one of: bedding, appliance, cookware, decor, electronics, furniture, storage, lighting, textbooks, other
+- category must be one of: bedding, appliance, cookware, decor, electronics, furniture, storage, lighting, textbooks, clothing, other
 - condition must be one of: new, like_new, good, fair
 - listingType must be one of: sell, donate
 - if listingType is donate, price must be 0
