@@ -22,9 +22,9 @@ const API_BASE = (function resolveApiBase() {
 })();
 
 /** How many rows to pull from GET /api/listings/feed (server caps at 250). */
-const HOME_FEED_FETCH_LIMIT = 250;
+const HOME_FEED_FETCH_LIMIT = 2000;
 /** Max cards rendered on home after merge/sort (logged-out includes demo sample cards). */
-const HOME_FEED_DISPLAY_CAP = 250;
+const HOME_FEED_DISPLAY_CAP = 2000;
 
 /**
  * Prefer API listing id on the checkout context; fall back to `db:123` key so
@@ -68,6 +68,7 @@ const LISTING_DIMENSIONS_MAX_LEN = 120;
 /** Listing keys (strings) the user starred/saved (browser only). */
 const SAVED_LISTINGS_KEY = "cdm_saved_listings_v1";
 const ADMIN_SESSION_KEY = "cdm_admin_session_v1";
+const TX_CONTACTED_KEY = "cdm_tx_contacted_v1";
 
 function getAdminSessionPassword() {
     try {
@@ -166,6 +167,7 @@ const TRANSACTIONS_STORAGE_KEY = "cdm_transactions_v1";
 const TRANSACTION_DONATION_FLAGS_KEY = "cdm_tx_donated_v1";
 /** Local-only buyer/seller conversations (per browser, any account used on this device). */
 const MESSAGES_STORAGE_KEY = "cdm_messages_v1";
+const MESSAGES_UNREAD_TRACKING_VERSION = 1;
 
 /** On paid listings, Bama Marketplace collects a 7% marketplace fee from sale proceeds (buyer pays list price only). */
 const PLATFORM_FEE_RATE = 0.07;
@@ -177,7 +179,7 @@ const state = {
     authEmail: null,
     /** Cached from GET /api/users/me for navbar avatar */
     authAvatarUrl: null,
-    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'previous-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations' | 'messages'} */
+    /** @type {'home' | 'saved' | 'seller-profile' | 'admin-login' | 'admin' | 'auth' | 'post' | 'donate-post' | 'my-listings' | 'my-donations' | 'previous-donations' | 'donation-detail' | 'listing' | 'checkout' | 'checkout-success' | 'tx-advance-success' | 'transactions' | 'profile' | 'about' | 'help' | 'contact' | 'donations' | 'messages'} */
     view: "home",
     /** `GET /api/listings/{id}` when viewing own donation detail (read-only + QR). */
     donationDetailListingId: /** @type {number | null} */ (null),
@@ -191,6 +193,11 @@ const state = {
     afterLoginIntent: null,
     /** Messages view: selected conversation id. */
     messagesActiveConversationId: /** @type {string | null} */ (null),
+    /** Completion success screen payload (after "Ready to advance"). */
+    txAdvanceSuccess:
+        /** @type {null | { title: string, listingId: number, transactionId: number, rated?: boolean }} */ (null),
+    /** Transactions view filter. */
+    txFilter: /** @type {'current' | 'action' | 'history' | 'all'} */ ("current"),
     /** Saved/starred listing keys (browser only). */
     savedListingKeys: getSavedListingKeys(),
     /** Home feed: listing key → image URL (set in JS after fetch; avoids huge src in innerHTML). */
@@ -441,141 +448,46 @@ function clearLocalTransactions() {
     localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
 }
 
-function getTransactionDonationFlags() {
+/** @returns {Set<string>} */
+function getTxContactedListingKeys() {
     try {
-        const raw = localStorage.getItem(TRANSACTION_DONATION_FLAGS_KEY);
-        const parsed = raw ? JSON.parse(raw) : {};
-        return parsed && typeof parsed === "object" ? parsed : {};
+        const raw = localStorage.getItem(TX_CONTACTED_KEY);
+        if (!raw) return new Set();
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return new Set();
+        return new Set(arr.map((x) => String(x)));
     } catch {
-        return {};
+        return new Set();
     }
 }
 
-function setTransactionDonationFlags(flags) {
-    localStorage.setItem(TRANSACTION_DONATION_FLAGS_KEY, JSON.stringify(flags && typeof flags === "object" ? flags : {}));
-}
-
-function hasTransactionDonationFlag(txId) {
-    const id = Number(txId);
-    if (!Number.isFinite(id) || id <= 0) return false;
-    const flags = getTransactionDonationFlags();
-    return Boolean(flags[String(id)]);
-}
-
-function markTransactionDonationFlag(txId, moved) {
-    const id = Number(txId);
-    if (!Number.isFinite(id) || id <= 0) return;
-    const flags = getTransactionDonationFlags();
-    if (moved) flags[String(id)] = true;
-    else delete flags[String(id)];
-    setTransactionDonationFlags(flags);
-}
-
-function upsertLocalDemoTransactionByRowId(rowId, txId = null, listingKey = "") {
-    const id = String(rowId || "").trim();
-    const lk = String(listingKey || "").trim();
-    if (!id) return null;
-    const list = loadLocalTransactions();
-    const hit = list.find(
-        (x) =>
-            String(x?.id || "") === id ||
-            (Number.isFinite(Number(txId)) && Number(txId) > 0 && Number(x?.transactionId) === Number(txId)) ||
-            (lk && String(x?.listingKey || "").trim() === lk),
-    );
-    if (hit) return hit;
-    const demo = buildDemoTransactionRows().find(
-        (x) =>
-            String(x?.id || "") === id ||
-            (Number.isFinite(Number(txId)) && Number(txId) > 0 && Number(x?.transactionId) === Number(txId)) ||
-            (lk && String(x?.listingKey || "").trim() === lk),
-    );
-    if (!demo) return null;
-    list.push(demo);
-    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
-    return demo;
-}
-
-function patchLocalTransactionByRowId(rowId, patcher, txId = null, listingKey = "") {
-    const id = String(rowId || "").trim();
-    const lk = String(listingKey || "").trim();
-    if ((!id && !(Number.isFinite(Number(txId)) && Number(txId) > 0) && !lk) || typeof patcher !== "function") return false;
-    const list = loadLocalTransactions();
-    const idx = list.findIndex(
-        (x) =>
-            String(x?.id || "") === id ||
-            (Number.isFinite(Number(txId)) && Number(txId) > 0 && Number(x?.transactionId) === Number(txId)) ||
-            (lk && String(x?.listingKey || "").trim() === lk),
-    );
-    if (idx < 0) return false;
-    const next = patcher({ ...list[idx] });
-    if (!next || typeof next !== "object") return false;
-    list[idx] = { ...list[idx], ...next };
-    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
-    return true;
-}
-
-function forceUpsertLocalDemoTransaction(seed, patcher) {
-    const list = loadLocalTransactions();
-    const rowId = String(seed?.rowId || "").trim();
-    const txId = Number(seed?.txId);
-    const listingKey = String(seed?.listingKey || "").trim();
-    const title = String(seed?.title || "Listing").trim() || "Listing";
-    const txRole = String(seed?.txRole || "sell").toLowerCase() === "buy" ? "buy" : "sell";
-    const nowIso = new Date().toISOString();
-    let idx = list.findIndex(
-        (x) =>
-            (rowId && String(x?.id || "") === rowId) ||
-            (Number.isFinite(txId) && txId > 0 && Number(x?.transactionId) === txId) ||
-            (listingKey && String(x?.listingKey || "").trim() === listingKey),
-    );
-    if (idx < 0) {
-        list.push({
-            id: rowId || `demo-${Date.now()}`,
-            fromServer: false,
-            createdAt: nowIso,
-            title,
-            listingKey: listingKey || `demo:${Date.now()}`,
-            listingId: null,
-            photoDataUrl: "",
-            kind: "purchase",
-            listPrice: 0,
-            platformFee: 0,
-            sellerNet: 0,
-            status: "awaiting_chat",
-            paymentMethod: "cash",
-            buyerUserId: txRole === "buy" ? DEMO_GUEST_USER_ID : 8123,
-            buyerDisplayName: txRole === "buy" ? "You" : "Demo Buyer",
-            sellerUserId: txRole === "sell" ? DEMO_GUEST_USER_ID : 9001,
-            sellerDisplayName: txRole === "sell" ? "You" : "Campus Seller",
-            txRole,
-            transactionId: Number.isFinite(txId) && txId > 0 ? txId : null,
-            buyerConfirmed: false,
-            sellerConfirmed: false,
-            donationMoved: false,
-        });
-        idx = list.length - 1;
+/** @param {Set<string>} set */
+function setTxContactedListingKeys(set) {
+    try {
+        localStorage.setItem(TX_CONTACTED_KEY, JSON.stringify([...set]));
+    } catch {
+        // ignore
     }
-    const next = typeof patcher === "function" ? patcher({ ...list[idx] }) : list[idx];
-    list[idx] = { ...list[idx], ...next, fromServer: false };
-    localStorage.setItem(TRANSACTIONS_STORAGE_KEY, JSON.stringify(list));
-    return true;
 }
 
-function dedupeTransactionRows(rows) {
-    const out = [];
-    const seen = new Set();
-    (Array.isArray(rows) ? rows : []).forEach((r) => {
-        const id = String(r?.id || "").trim();
-        const k = id || `${String(r?.listingKey || "")}|${String(r?.createdAt || "")}|${String(r?.txRole || "")}`;
-        if (seen.has(k)) return;
-        seen.add(k);
-        out.push(r);
-    });
-    return out;
+/** @param {string} listingKey */
+function markTxContacted(listingKey) {
+    const key = String(listingKey || "").trim();
+    if (!key) return;
+    const set = getTxContactedListingKeys();
+    set.add(key);
+    setTxContactedListingKeys(set);
 }
 
-/** Maps GET /api/transactions/mine | /sales row → UI row (matches localStorage shape). */
-function mapServerTransactionToRow(d, txRole = "buy") {
+/** @param {string} listingKey */
+function hasTxContacted(listingKey) {
+    const key = String(listingKey || "").trim();
+    if (!key) return false;
+    return getTxContactedListingKeys().has(key);
+}
+
+/** Maps GET /api/transactions/mine row → UI row (matches localStorage shape). */
+function mapServerTransactionToRow(d) {
     const amount = Number(d.amount);
     const isPurchase = amount > 0;
     const st = String(d.status || "").toLowerCase();
@@ -590,20 +502,10 @@ function mapServerTransactionToRow(d, txRole = "buy") {
     }
     const lid = d.listingId ?? d.ListingId;
     const tid = d.transactionId ?? d.TransactionId;
-    const pmRaw = String(d.paymentMethod ?? d.PaymentMethod ?? "cash").toLowerCase();
-    const paymentMethod = pmRaw === "card" ? "card" : "cash";
-    const bidRaw = d.buyerId ?? d.BuyerId;
-    const buyerUserId = bidRaw != null && Number.isFinite(Number(bidRaw)) ? Number(bidRaw) : null;
-    const bname = d.buyerDisplayName ?? d.BuyerDisplayName;
-    const sidRaw = d.sellerId ?? d.SellerId;
-    const sellerUserId = sidRaw != null && Number.isFinite(Number(sidRaw)) ? Number(sidRaw) : null;
-    const sname = d.sellerDisplayName ?? d.SellerDisplayName;
-    const sellerDisplayName =
-        sname != null && String(sname).trim() ? String(sname).trim() : sellerUserId ? `User #${sellerUserId}` : "Seller";
-    const buyerConfirmed = Boolean(d.buyerConfirmed ?? d.BuyerConfirmed);
-    const sellerConfirmed = Boolean(d.sellerConfirmed ?? d.SellerConfirmed);
+    const hasRatingRaw = d.hasRating ?? d.HasRating;
     return {
-        id: `srv-${txRole}-${tid}`,
+        id: `srv-${tid}`,
+        transactionId: tid,
         fromServer: true,
         transactionId: tid != null && Number.isFinite(Number(tid)) ? Number(tid) : null,
         createdAt: createdAt || new Date().toISOString(),
@@ -619,15 +521,7 @@ function mapServerTransactionToRow(d, txRole = "buy") {
         platformFee: Number(d.platformFee) || 0,
         sellerNet: isPurchase ? amount - (Number(d.platformFee) || 0) : 0,
         status: uiStatus,
-        paymentMethod,
-        buyerUserId,
-        buyerDisplayName: bname != null && String(bname).trim() ? String(bname).trim() : null,
-        sellerUserId,
-        sellerDisplayName,
-        buyerConfirmed,
-        sellerConfirmed,
-        donationMoved: hasTransactionDonationFlag(tid),
-        txRole,
+        hasRating: Boolean(hasRatingRaw),
     };
 }
 
@@ -1013,6 +907,7 @@ const categoryLabel = {
     storage: "Storage / organizers",
     lighting: "Lighting",
     textbooks: "Textbooks",
+    clothing: "Clothing",
     other: "Other",
 };
 
@@ -1054,6 +949,7 @@ function listingMatchesCategoryChips(/** @type {string | null} */ slug, /** @typ
         if (c === "cookware" && slug === "cookware") return true;
         if (c === "decor" && slug === "decor") return true;
         if (c === "electronics" && slug === "electronics") return true;
+        if (c === "clothing" && slug === "clothing") return true;
         if (c === "other" && slug === "other") return true;
         if ((c === "mini_fridge" || c === "microwave") && slug === "appliance") return true;
     }
@@ -1287,6 +1183,8 @@ function homeFeedCardHtml(item) {
     const key = escapeHtml(item.key);
     const fb = encodeURIComponent(item.title || "Listing");
     const saved = state.savedListingKeys.has(item.key);
+    const status = String(item?.status || "").trim().toLowerCase();
+    const isClaimed = status === "claimed";
     const saveBtn = `
         <button
             type="button"
@@ -1296,8 +1194,15 @@ function homeFeedCardHtml(item) {
             aria-pressed="${saved ? "true" : "false"}"
             title="${saved ? "Unsave" : "Save"}"
         >${saved ? "★" : "☆"}</button>`;
-    const thumbImg = item.photoDataUrl
-        ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+    const claimedBadge = isClaimed
+        ? `<span class="badge text-bg-secondary position-absolute top-0 start-0 m-2" style="letter-spacing:0.06em;">CLAIMED</span>
+           <div class="cdm-claimed-overlay" aria-hidden="true">Claimed</div>`
+        : "";
+    // Prefer rendering the image `src` directly. (Hydration via state/feed map is still used elsewhere,
+    // but we don't want blank thumbs if hydration fails or is delayed.)
+    const thumbSrc = item.photoDataUrl ? escapeAttrForDoubleQuoted(item.photoDataUrl) : "";
+    const thumbImg = thumbSrc
+        ? `<img class="cdm-listing-thumb-img" alt="" data-cdm-thumb-fallback="${fb}" data-feed-img-key="${key}" src="${thumbSrc}" />`
         : "";
     const condRaw = item.condition != null && String(item.condition).trim() !== "" ? item.condition : null;
     const condLine = condRaw
@@ -1307,17 +1212,24 @@ function homeFeedCardHtml(item) {
     const scoreTone = score >= 80 ? "success" : score >= 60 ? "warning" : "secondary";
     const matchBadge = `<span class="badge text-bg-${scoreTone} cdm-match-badge">${escapeHtml(String(score))}% match</span>`;
     const oboBadge = listingOrBestOfferBadgeHtml(item);
+
+    const titleBlock = isClaimed
+        ? `<div class="cdm-listing-title-link fw-semibold text-muted" aria-disabled="true">${title}</div>`
+        : `<button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="${key}">${title}</button>`;
+    const viewBtn = isClaimed
+        ? `<button type="button" class="btn btn-sm btn-outline-secondary" disabled>Claimed</button>`
+        : `<button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>`;
     return `
         <div class="col-12 col-md-6 col-xl-4">
-            <div class="cdm-card cdm-listing-card">
-                <div class="cdm-listing-thumb">${thumbImg}${saveBtn}</div>
+            <div class="cdm-card cdm-listing-card ${isClaimed ? "is-claimed" : ""}">
+                <div class="cdm-listing-thumb position-relative">${thumbImg}${saveBtn}${claimedBadge}</div>
                 <div class="p-3">
-                    <button type="button" class="cdm-listing-title-link fw-semibold" data-action="view-listing" data-listing-key="${key}">${title}</button>
+                    ${titleBlock}
                     <div class="cdm-muted small">${blurb}</div>
                     ${condLine}
                     <div class="mt-2 d-flex align-items-center justify-content-between">
                         <div class="d-flex align-items-center gap-2 flex-wrap"><div class="fw-semibold">${price}</div>${oboBadge}${matchBadge}</div>
-                        <button type="button" class="btn btn-sm cdm-btn-crimson" data-action="view-listing" data-listing-key="${key}">View</button>
+                        ${viewBtn}
                     </div>
                 </div>
             </div>
@@ -1461,10 +1373,9 @@ async function fetchFeedItemsForHome() {
                         : `${cat} · ${seller}`;
                     const priceNum = Number(row.price);
                     const urlRaw = row.imageUrl ?? row.ImageUrl;
-                    const img =
-                        urlRaw && String(urlRaw).trim()
-                            ? String(urlRaw).trim()
-                            : demoThumbSvgDataUrl(row.title);
+                    // Home feed: only show rows that actually have images.
+                    const img = urlRaw && String(urlRaw).trim() ? String(urlRaw).trim() : null;
+                    if (!img) return null;
                     const key = `db:${row.listingId ?? row.ListingId}`;
                     state.feedThumbSrcByKey[key] = img;
                     const campusRaw = row.campusId ?? row.CampusId;
@@ -1506,48 +1417,15 @@ async function fetchFeedItemsForHome() {
                             : estimateFallbackMatchScore(item);
                     state.feedMatchScoreByListingId[lid] = cardPct;
                     return item;
-                });
-        } else {
-            state.appMode = "demo-fallback";
+                })
+                .filter(Boolean);
         }
     } catch {
         state.appMode = "demo-fallback";
     }
     if (apiFeedOk) state.appMode = "live";
 
-    const sample = SAMPLE_HOME_FEED.map((x) => {
-        const priceNum = Number(x.priceNum);
-        const photoDataUrl = x.photoDataUrl || demoThumbSvgDataUrl(x.title);
-        const blurbPct = String(x.blurb || "").match(/^(\d+)%\s*match/i);
-        return {
-            key: `sample:${x.id}`,
-            title: x.title,
-            blurb: x.blurb,
-            priceLabel: x.priceLabel,
-            priceNum,
-            photoDataUrl,
-            campusId: x.campusId ?? 1,
-            gapSolution: x.gapSolution ?? null,
-            condition: null,
-            categorySlug: x.categorySlug ? normalizeListingCategorySlug(x.categorySlug) : null,
-            listingKind: priceNum === 0 ? "donate" : "sell",
-            spaceSuitability:
-                x.spaceSuitability != null && String(x.spaceSuitability).trim() !== ""
-                    ? String(x.spaceSuitability).trim()
-                    : null,
-            matchScore: blurbPct ? Number(blurbPct[1]) : null,
-        };
-    });
-    const fillSampleThumbs = () => {
-        sample.forEach((x) => {
-            state.feedThumbSrcByKey[x.key] = x.photoDataUrl;
-        });
-    };
-    // Logged out: DB rows + demo preview cards. Logged in: MySQL-backed rows only, unless backend is down.
-    if (!state.token || state.appMode === "demo-fallback") {
-        fillSampleThumbs();
-        return sortHomeFeedItemsByMatchDesc([...dbCards, ...sample]).slice(0, HOME_FEED_DISPLAY_CAP);
-    }
+    // Always show only real DB-backed listings on the home feed.
     return sortHomeFeedItemsByMatchDesc(dbCards).slice(0, HOME_FEED_DISPLAY_CAP);
 }
 
@@ -1956,7 +1834,51 @@ function navigate(view) {
     if (view !== "checkout-success") {
         state.checkoutSuccess = null;
     }
+    if (view !== "tx-advance-success") {
+        state.txAdvanceSuccess = null;
+    }
+    pushNavState();
     render();
+}
+
+let isRestoringHistoryState = false;
+
+function snapshotNavState() {
+    return {
+        view: state.view,
+        listingKey: state.listingKey,
+        sellerProfileUserId: state.sellerProfileUserId,
+        donationDetailListingId: state.donationDetailListingId,
+        authPageMode: state.authPageMode,
+        txFilter: state.txFilter,
+        messagesActiveConversationId: state.messagesActiveConversationId,
+        // Keep success screens stable on back/forward within session.
+        checkoutSuccess: state.checkoutSuccess,
+        txAdvanceSuccess: state.txAdvanceSuccess,
+    };
+}
+
+function applyNavState(s) {
+    if (!s || typeof s !== "object") return;
+    if (typeof s.view === "string") state.view = s.view;
+    state.listingKey = s.listingKey ?? null;
+    state.sellerProfileUserId = s.sellerProfileUserId ?? null;
+    state.donationDetailListingId = s.donationDetailListingId ?? null;
+    state.authPageMode = s.authPageMode === "signup" ? "signup" : "login";
+    state.txFilter = s.txFilter || state.txFilter;
+    state.messagesActiveConversationId = s.messagesActiveConversationId ?? null;
+    state.checkoutSuccess = s.checkoutSuccess ?? null;
+    state.txAdvanceSuccess = s.txAdvanceSuccess ?? null;
+}
+
+function pushNavState() {
+    if (typeof window === "undefined") return;
+    if (isRestoringHistoryState) return;
+    try {
+        window.history.pushState(snapshotNavState(), "");
+    } catch {
+        // ignore
+    }
 }
 
 function navigateAuth(mode) {
@@ -1977,20 +1899,16 @@ function navigateToCheckout(ctx) {
     }
     state.checkoutSuccess = null;
     state.checkoutContext = ctx;
-    state.checkoutSuggestionHydratedKey = null;
-    state.view = "checkout";
-    render();
+    navigate("checkout");
 }
 
 function navigateTransactions() {
     state.checkoutSuccess = null;
-    state.view = "transactions";
-    render();
+    navigate("transactions");
 }
 
 function navigateMessages() {
-    state.view = "messages";
-    render();
+    navigate("messages");
 }
 
 function isAuthed() {
@@ -2065,6 +1983,7 @@ function parseJwtSub(token) {
  *   sellerLabel: string,
  *   buyerUserId: number,
  *   buyerLabel: string,
+ *   lastReadAtByUserId?: Record<string, string>,
  *   updatedAt: string,
  *   messages: MessageEntry[]
  * }} MessageConversation
@@ -2085,6 +2004,90 @@ function getStoredConversations() {
 /** @param {MessageConversation[]} rows */
 function setStoredConversations(rows) {
     localStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(rows));
+}
+
+function getUnreadConversationCount() {
+    const myUserId = parseJwtSub(state.token);
+    if (myUserId == null) return 0;
+    const meKey = String(myUserId);
+    const rows = getStoredConversations();
+    let unread = 0;
+    for (const conv of rows) {
+        const involved =
+            Number(conv.buyerUserId) === myUserId || Number(conv.sellerUserId) === myUserId;
+        if (!involved) continue;
+        const lastReadIso = conv.lastReadAtByUserId?.[meKey] || null;
+        const lastReadT = lastReadIso ? new Date(lastReadIso).getTime() : 0;
+        const hasUnread = (conv.messages || []).some((m) => {
+            const sender = Number(m.senderUserId);
+            if (sender === myUserId) return false;
+            const t = new Date(m.createdAt).getTime();
+            return Number.isFinite(t) && t > lastReadT;
+        });
+        if (hasUnread) unread++;
+    }
+    return unread;
+}
+
+function markConversationRead(conversationId) {
+    const myUserId = parseJwtSub(state.token);
+    if (myUserId == null) return;
+    const rows = getStoredConversations();
+    const conv = rows.find((r) => r.id === conversationId);
+    if (!conv) return;
+    conv.lastReadAtByUserId = conv.lastReadAtByUserId && typeof conv.lastReadAtByUserId === "object" ? conv.lastReadAtByUserId : {};
+    conv.lastReadAtByUserId[String(myUserId)] = new Date().toISOString();
+    setStoredConversations(rows);
+}
+
+function syncMessagesUnreadBadges(root = document) {
+    const n = getUnreadConversationCount();
+    root.querySelectorAll("[data-messages-badge]").forEach((el) => {
+        if (!el) return;
+        if (n > 0) {
+            el.textContent = String(n);
+            el.classList.remove("d-none");
+        } else {
+            el.textContent = "";
+            el.classList.add("d-none");
+        }
+    });
+}
+
+let lastUnreadConversationCount = 0;
+function showMessagesNoticeIfNeeded() {
+    const n = getUnreadConversationCount();
+    if (n > lastUnreadConversationCount) {
+        showToastNotice(n === 1 ? "New message" : `${n} conversations have new messages`);
+    }
+    lastUnreadConversationCount = n;
+}
+
+function showToastNotice(text) {
+    const msg = String(text || "").trim();
+    if (!msg) return;
+    let host = document.getElementById("cdm-toast-host");
+    if (!host) {
+        host = document.createElement("div");
+        host.id = "cdm-toast-host";
+        host.style.position = "fixed";
+        host.style.right = "16px";
+        host.style.top = "16px";
+        host.style.zIndex = "1080";
+        host.style.maxWidth = "320px";
+        document.body.appendChild(host);
+    }
+    const node = document.createElement("div");
+    node.className = "border rounded-3 shadow-sm bg-dark text-white px-3 py-2 mb-2";
+    node.textContent = msg;
+    host.appendChild(node);
+    setTimeout(() => {
+        try {
+            node.remove();
+        } catch {
+            /* ignore */
+        }
+    }, 2600);
 }
 
 /**
@@ -2140,62 +2143,63 @@ function ensureConversationPeers(p) {
 }
 
 /**
- * Current user is buyer; opens thread with seller.
- * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
+ * Ensure a buyer<->seller thread exists for a listing (either side can initiate).
+ * @param {{
+ *  listingKey: string,
+ *  listingTitle: string,
+ *  sellerUserId: number,
+ *  sellerLabel: string,
+ *  buyerUserId: number,
+ *  buyerLabel: string
+ * }} payload
  * @returns {MessageConversation | null}
  */
-function ensureConversationForListing(payload) {
-    const buyerUserId = parseJwtSub(state.token);
-    if (buyerUserId == null) return null;
-    if (!Number.isFinite(payload.sellerUserId) || payload.sellerUserId <= 0) return null;
-    if (buyerUserId === payload.sellerUserId) return null;
-    const buyerLabel = state.authEmail || `User #${buyerUserId}`;
-    return ensureConversationPeers({
-        listingKey: payload.listingKey,
-        listingTitle: payload.listingTitle,
-        buyerUserId,
-        sellerUserId: Number(payload.sellerUserId),
-        buyerLabel,
-        sellerLabel: String(payload.sellerLabel || `User #${payload.sellerUserId}`),
-    });
-}
+function ensureConversationForSale(payload) {
+    const myUserId = parseJwtSub(state.token);
+    if (myUserId == null) return null;
+    const sellerUserId = Number(payload.sellerUserId);
+    const buyerUserId = Number(payload.buyerUserId);
+    if (!Number.isFinite(sellerUserId) || sellerUserId <= 0) return null;
+    if (!Number.isFinite(buyerUserId) || buyerUserId <= 0) return null;
+    if (sellerUserId === buyerUserId) return null;
+    if (myUserId !== sellerUserId && myUserId !== buyerUserId) return null;
 
-/**
- * Current user is seller; opens thread with buyer (after a sale).
- * @param {{ listingKey: string, listingTitle: string, buyerUserId: number, buyerLabel: string }} payload
- */
-function ensureConversationForSellerToBuyer(payload) {
-    const me = parseJwtSub(state.token);
-    if (me == null) return null;
-    if (!Number.isFinite(payload.buyerUserId) || payload.buyerUserId <= 0) return null;
-    const sellerLabel = state.authEmail || `User #${me}`;
-    return ensureConversationPeers({
-        listingKey: payload.listingKey,
-        listingTitle: payload.listingTitle,
-        buyerUserId: Number(payload.buyerUserId),
-        sellerUserId: me,
-        buyerLabel: String(payload.buyerLabel || `User #${payload.buyerUserId}`),
+    const listingKey = String(payload.listingKey || "").trim();
+    if (!listingKey) return null;
+
+    const sellerLabel = String(payload.sellerLabel || `User #${sellerUserId}`);
+    const buyerLabel = String(payload.buyerLabel || `User #${buyerUserId}`);
+
+    const rows = getStoredConversations();
+    const existing = rows.find(
+        (row) =>
+            String(row.listingKey) === listingKey &&
+            Number(row.buyerUserId) === buyerUserId &&
+            Number(row.sellerUserId) === sellerUserId,
+    );
+    if (existing) {
+        if (!existing.buyerLabel && buyerLabel) existing.buyerLabel = buyerLabel;
+        if (!existing.sellerLabel && sellerLabel) existing.sellerLabel = sellerLabel;
+        if (!existing.listingTitle && payload.listingTitle) existing.listingTitle = payload.listingTitle;
+        setStoredConversations(rows);
+        return existing;
+    }
+
+    const nowIso = new Date().toISOString();
+    const created = {
+        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        listingKey,
+        listingTitle: String(payload.listingTitle || "Listing"),
+        sellerUserId,
         sellerLabel,
-    });
-}
-
-/**
- * Reuse an existing thread by listing when transaction card metadata is incomplete.
- * @param {string} listingKey
- * @returns {MessageConversation | null}
- */
-function findConversationForCurrentUserByListingKey(listingKey) {
-    const me = parseJwtSub(state.token);
-    const key = String(listingKey || "").trim();
-    if (me == null || !key) return null;
-    const rows = getStoredConversations()
-        .filter(
-            (row) =>
-                String(row.listingKey || "").trim() === key &&
-                (Number(row.buyerUserId) === me || Number(row.sellerUserId) === me),
-        )
-        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-    return rows[0] || null;
+        buyerUserId,
+        buyerLabel,
+        updatedAt: nowIso,
+        messages: [],
+    };
+    rows.push(created);
+    setStoredConversations(rows);
+    return created;
 }
 
 /**
@@ -2246,6 +2250,32 @@ function openMessagesWithBuyerForListing(payload) {
             return;
         }
         alert("Couldn’t open this chat from Transactions. Try opening Messages from the listing page.");
+        return;
+    }
+    state.messagesActiveConversationId = conv.id;
+    navigateMessages();
+}
+
+/**
+ * Opens messages thread for a sale (seller or buyer can initiate).
+ * @param {{
+ *  listingKey: string,
+ *  listingTitle: string,
+ *  sellerUserId: number,
+ *  sellerLabel: string,
+ *  buyerUserId: number,
+ *  buyerLabel: string
+ * }} payload
+ */
+function openMessagesForSale(payload) {
+    if (!isAuthed()) {
+        state.afterLoginIntent = { type: "navigate", view: "messages" };
+        navigateAuth("login");
+        return;
+    }
+    const conv = ensureConversationForSale(payload);
+    if (!conv) {
+        alert("Could not open messages for this sale.");
         return;
     }
     state.messagesActiveConversationId = conv.id;
@@ -2554,9 +2584,13 @@ function openDonationDetail(listingId) {
 function topNavPrimaryLinksHtml(active) {
     const li = (action, label, extraClass = "") => {
         const cur = active === action;
+        const badge =
+            action === "nav-messages"
+                ? ` <span class="badge rounded-pill text-bg-danger ms-2 d-none" data-messages-badge></span>`
+                : "";
         return `<li class="nav-item"><a class="nav-link ${extraClass}${cur ? " active" : ""}" href="#" data-action="${action}"${
             cur ? ' aria-current="page"' : ""
-        }>${label}</a></li>`;
+        }>${label}${badge}</a></li>`;
     };
     return `<ul class="navbar-nav me-auto mb-2 mb-lg-0">
                             ${li("go-home", "Home")}
@@ -2601,6 +2635,7 @@ function wireNav(root) {
         });
     });
     syncSavedCountBadges(root);
+    syncMessagesUnreadBadges(root);
     root.querySelectorAll("[data-action='post-item']").forEach((btn) => {
         btn.addEventListener("click", () => {
             if (!requireAuth({ type: "navigate", view: "post" })) return;
@@ -2678,7 +2713,7 @@ function wireNav(root) {
         btn.addEventListener("click", (e) => {
             e.preventDefault();
             const f = btn.getAttribute("data-tx-filter");
-            if (f === "all" || f === "action") {
+            if (f === "current" || f === "all" || f === "action" || f === "history") {
                 state.txFilter = f;
                 render();
             }
@@ -3639,6 +3674,7 @@ function listingCategorySelectOptionsHtml() {
         <option value="cookware">Cookware & cooking supplies</option>
         <option value="decor">Decor</option>
         <option value="electronics">Electronics</option>
+        <option value="clothing">Clothing</option>
         <option value="other">Other</option>
     `;
 }
@@ -5329,6 +5365,7 @@ async function renderAdminDashboard() {
               .slice(0, 100)
               .map((r) => {
                   const score = Number(r.score ?? 0);
+                  const raterId = Number(r.raterId ?? r.RaterId ?? 0);
                   const rateeId = Number(r.rateeId ?? r.RateeId ?? 0);
                   const onProb = Boolean(r.rateeOnProbation ?? r.RateeOnProbation);
                   const tags = [
@@ -5348,10 +5385,11 @@ async function renderAdminDashboard() {
                       : onProb
                         ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-admin-probation-ratee="${rateeId}" data-admin-probation-set="0">Clear probation</button>`
                         : `<button type="button" class="btn btn-sm btn-outline-warning" data-admin-probation-ratee="${rateeId}" data-admin-probation-set="1">Probation</button>`;
-                  return `<tr>
-                    <td>${escapeHtml(String(r.ratingId ?? ""))}</td>
+                  const probationRowClass = onProb ? "cdm-probation-row" : "";
+                  return `<tr class="${probationRowClass}">
+                    <td>${escapeHtml(String(rateeId || ""))}</td>
                     <td>${escapeHtml(String(r.listingId ?? ""))}</td>
-                    <td>${escapeHtml(String(r.rateeId ?? ""))}</td>
+                    <td>${escapeHtml(String(raterId || ""))}</td>
                     <td class="text-end">${score}</td>
                     <td>${escapeHtml(tags)}</td>
                     <td class="cdm-muted small" style="max-width: 14rem">${escapeHtml(String(r.comment ?? ""))}</td>
@@ -5395,7 +5433,7 @@ async function renderAdminDashboard() {
             <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3">
               <div>
                 <h1 class="h3 cdm-title mb-1">Admin dashboard</h1>
-                <p class="cdm-muted small mb-0">Activity and money in the marketplace, then trust-and-safety lists. Weeks start on Monday (UTC date from the server).</p>
+                
               </div>
               <div class="d-flex flex-column align-items-stretch align-items-md-end gap-1">
                 <label class="small cdm-muted mb-0" for="admin-weeks-select">Time range</label>
@@ -5519,7 +5557,7 @@ async function renderAdminDashboard() {
                       <div class="cdm-muted small">Not picked up</div>
                     </div>
                   </div>
-                  <div class="cdm-muted small mt-3">Uses <code>listings.donation_handed_off_at</code> when present.</div>
+                  
                 </div>
               </div>
 
@@ -5542,11 +5580,11 @@ async function renderAdminDashboard() {
                   <p class="cdm-muted small mb-2">Flagged, harsh, or very low star ratings (all time).</p>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0" id="admin-flagged-reviews-table">
-                      <thead><tr><th>ID</th><th>Listing</th><th>Ratee</th><th class="text-end">★</th><th>Tags</th><th>Comment</th><th>Actions</th></tr></thead>
+                      <thead><tr><th>Seller ID</th><th>Listing</th><th>Rater ID</th><th class="text-end">★</th><th>Tags</th><th>Comment</th><th>Actions</th></tr></thead>
                       <tbody>${flaggedRows}</tbody>
                     </table>
                   </div>
-                  <div class="cdm-muted small mt-3">Probation uses <code>users.on_probation</code> (run <code>database/alter_users_on_probation.sql</code>). Flag signals need <code>ratings.is_flagged</code> / <code>ratings.is_harsh</code>.</div>
+                  
                 </div>
               </div>
             </div>
@@ -5789,6 +5827,7 @@ function buildHomeFiltersHtml() {
         ["cookware", categoryLabel.cookware],
         ["decor", categoryLabel.decor],
         ["electronics", categoryLabel.electronics],
+        ["clothing", categoryLabel.clothing],
         ["furniture", categoryLabel.furniture],
         ["storage", categoryLabel.storage],
         ["lighting", categoryLabel.lighting],
@@ -6018,6 +6057,9 @@ async function renderHome() {
                             </button>
                             <button type="button" class="cdm-chip" data-feed-chip="electronics" aria-pressed="false">
                                 🔌 Electronics
+                            </button>
+                            <button type="button" class="cdm-chip" data-feed-chip="clothing" aria-pressed="false">
+                                👕 Clothing
                             </button>
                         </div>
                     </div>
@@ -7397,6 +7439,49 @@ function wireMyListingsPage(root) {
             render();
         });
     });
+
+    root.querySelectorAll("[data-action='tx-open-listing']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = btn.getAttribute("data-listing-key");
+            if (!key) return;
+            navigateListing(key);
+        });
+    });
+
+    root.querySelectorAll("[data-action='view-seller']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const idRaw = btn.getAttribute("data-seller-id");
+            const id = Number(idRaw);
+            if (!Number.isFinite(id) || id <= 0) return;
+            state.sellerProfileUserId = id;
+            navigate("seller-profile");
+        });
+    });
+
+    root.querySelectorAll("[data-action='seller-open-chat']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const myId = parseJwtSub(state.token);
+            if (myId == null) {
+                navigateAuth("login");
+                return;
+            }
+            const listingId = Number(btn.getAttribute("data-listing-id"));
+            const listingTitle = String(btn.getAttribute("data-listing-title") || "Listing").trim();
+            const buyerId = Number(btn.getAttribute("data-buyer-id"));
+            const buyerLabel = String(btn.getAttribute("data-buyer-label") || "Buyer").trim();
+            if (!Number.isFinite(listingId) || listingId <= 0) return;
+            if (!Number.isFinite(buyerId) || buyerId <= 0) return;
+            openMessagesForSale({
+                listingKey: `db:${listingId}`,
+                listingTitle,
+                sellerUserId: myId,
+                sellerLabel: state.authEmail || `User #${myId}`,
+                buyerUserId: buyerId,
+                buyerLabel,
+            });
+        });
+    });
 }
 
 function resolveListingByKey(key) {
@@ -7515,7 +7600,7 @@ function renderListingDbFromApi(L, extra = null) {
     const urlRaw = L.imageUrl ?? L.ImageUrl;
     const galleryHtml =
         urlRaw && String(urlRaw).trim()
-            ? `<img id="cdm-listing-hero-img" class="cdm-photo-hero cdm-photo-hero--listing" alt="" data-cdm-thumb-fallback="${fb}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+            ? `<img id="cdm-listing-hero-img" class="cdm-photo-hero cdm-photo-hero--listing" alt="" data-cdm-thumb-fallback="${fb}" src="${escapeAttrForDoubleQuoted(String(urlRaw).trim())}" />`
             : `<div class="cdm-listing-gallery-empty text-muted small">No image provided</div>`;
 
     const sellerNumeric = L.sellerId ?? L.SellerId;
@@ -7564,6 +7649,7 @@ function renderListingDbFromApi(L, extra = null) {
         myUid != null && sellerNumeric != null && Number(sellerNumeric) === myUid;
     const statusLower = String(L.status ?? L.Status ?? "").toLowerCase();
     const isSold = statusLower === "sold";
+    const isClaimed = statusLower === "claimed";
 
     let primaryCtaHtml;
     let footNoteHtml;
@@ -7587,6 +7673,12 @@ function renderListingDbFromApi(L, extra = null) {
             <div id="cdm-sold-buyer-msg-slot" class="mt-2"></div>
           </div>`;
         footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Purchases are no longer available for this listing.</p>`;
+    } else if (isClaimed) {
+        primaryCtaHtml = `<div class="alert alert-light border mb-0 mt-3" role="status">
+            <div class="fw-semibold mb-1">This listing is claimed</div>
+            <div class="small text-muted">Someone checked out and reserved it. If the pickup falls through, it may return to the feed.</div>
+          </div>`;
+        footNoteHtml = `<p class="small text-muted border-top pt-3 mt-3 mb-0">Claimed listings can’t be purchased right now.</p>`;
     } else {
         primaryCtaHtml = `<button class="btn cdm-btn-crimson w-100 py-2 fw-semibold mt-3" type="button" data-action="buy-item" data-listing-key="db:${escapeHtml(String(L.listingId))}">Claim / Buy</button>
            <button
@@ -7978,6 +8070,8 @@ async function renderMyListings() {
     root.innerHTML = `<div class="cdm-shell"><div class="container-fluid cdm-max px-3 py-5 text-center cdm-muted">Loading listings…</div></div>`;
 
     let apiRows = [];
+    let sellingRows = [];
+    let sellingRowsOk = false;
     if (state.token) {
         const { res, data } = await apiJson("/api/listings/mine?limit=48");
         if (res.ok && Array.isArray(data)) {
@@ -7986,6 +8080,12 @@ async function renderMyListings() {
                 const sid = row.sellerId ?? row.SellerId;
                 return myId != null && sid != null && Number(sid) === myId;
             });
+        }
+
+        const selling = await apiJson("/api/transactions/selling?limit=48");
+        if (selling.res.ok && Array.isArray(selling.data)) {
+            sellingRows = selling.data;
+            sellingRowsOk = true;
         }
     }
 
@@ -7998,9 +8098,127 @@ async function renderMyListings() {
         }
     });
 
-    const apiHtml = apiRows.length
-        ? `<h2 class="h6 text-uppercase cdm-muted small mb-3" style="letter-spacing:0.06em;">Published (your account)</h2>${apiRows.map(listingCardApiHtml).join("")}`
+    const statusKey = (r) => String(r?.status ?? r?.Status ?? "").trim().toLowerCase();
+    const claimedListingRows = apiRows.filter((r) => {
+        const s = statusKey(r);
+        // Support both: new flow uses "claimed"; legacy schema used "pending" on listings.
+        return s === "claimed" || s === "pending";
+    });
+    const activeRows = apiRows.filter((r) => statusKey(r) === "active");
+    const soldRows = apiRows.filter((r) => statusKey(r) === "sold");
+    const otherRows = apiRows.filter((r) => !["active", "sold", "claimed", "pending"].includes(statusKey(r)));
+
+    const saleByListingId = new Map();
+    sellingRows.forEach((t) => {
+        const lid = Number(t.listingId ?? t.ListingId);
+        if (!Number.isFinite(lid) || lid <= 0) return;
+        const buyerId = Number(t.buyerId ?? t.BuyerId) || 0;
+        const buyerNameRaw = String((t.buyerDisplayName ?? t.BuyerDisplayName) ?? "").trim();
+        saleByListingId.set(lid, {
+            transactionId: Number(t.transactionId ?? t.TransactionId) || 0,
+            buyerId,
+            buyerDisplayName: buyerNameRaw || (buyerId > 0 ? `User #${buyerId}` : "Buyer"),
+        });
+    });
+
+    const claimedBuyerHint =
+        claimedListingRows.length > 0 && !sellingRowsOk
+            ? `<div class="small text-danger-emphasis mt-2">
+                    Buyer info couldn’t load from the API. If you just updated backend code, restart the API and refresh this page.
+               </div>`
+            : "";
+
+    const claimedListingsHtml = claimedListingRows.length
+        ? `<div class="cdm-card p-4 mb-4 border border-warning-subtle" style="background: rgba(245, 158, 11, 0.08);">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                    <div>
+                        <div class="small text-uppercase cdm-muted" style="letter-spacing:0.06em;">Claimed / in progress</div>
+                        <div class="fw-semibold">Your claimed listings</div>
+                        <div class="small cdm-muted">These are reserved by a buyer (not purchasable on the feed).</div>
+                        ${claimedBuyerHint}
+                    </div>
+                </div>
+                <div class="d-grid gap-2">
+                    ${claimedListingRows
+                        .map((row) => {
+                            const lid = Number(row.listingId ?? row.ListingId);
+                            const title = escapeHtml(String(row.title || "Listing"));
+                            const sale = Number.isFinite(lid) ? saleByListingId.get(lid) : null;
+                            const buyerId = sale ? Number(sale.buyerId) : 0;
+                            const buyerLabel = sale ? String(sale.buyerDisplayName || "Buyer") : "Buyer";
+                            const urlRaw = row.imageUrl ?? row.ImageUrl;
+                            const fb = encodeURIComponent(String(row.title || "Listing"));
+                            const thumb =
+                                urlRaw && String(urlRaw).trim()
+                                    ? `<img class="cdm-photo-thumb" alt="" data-cdm-thumb-fallback="${fb}" data-mine-thumb-id="${escapeHtml(
+                                          String(lid),
+                                      )}" src="${FEED_THUMB_PLACEHOLDER_SRC}" />`
+                                    : "";
+                            const chatBtn =
+                                Number.isFinite(buyerId) && buyerId > 0 && Number.isFinite(lid) && lid > 0
+                                    ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="seller-open-chat" data-listing-id="${escapeAttrForDoubleQuoted(
+                                          String(lid),
+                                      )}" data-listing-title="${escapeAttrForDoubleQuoted(
+                                          String(row.title || "Listing"),
+                                      )}" data-buyer-id="${escapeAttrForDoubleQuoted(
+                                          String(buyerId),
+                                      )}" data-buyer-label="${escapeAttrForDoubleQuoted(buyerLabel)}">Open chat</button>`
+                                    : `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill" disabled title="Buyer info not available yet">Open chat</button>`;
+                            const buyerBtn =
+                                Number.isFinite(buyerId) && buyerId > 0
+                                    ? `<button type="button" class="btn btn-sm btn-outline-secondary rounded-pill" data-action="view-seller" data-seller-id="${escapeAttrForDoubleQuoted(
+                                          String(buyerId),
+                                      )}">View buyer profile</button>`
+                                    : "";
+                            const buyerLine =
+                                sale && Number.isFinite(buyerId) && buyerId > 0
+                                    ? `<div class="small cdm-muted">Buyer: <span class="text-body fw-semibold">${escapeHtml(buyerLabel)}</span></div>`
+                                    : `<div class="small cdm-muted">Buyer: <span class="text-body fw-semibold">—</span></div>`;
+                            return `<div class="border rounded-3 p-3">
+                                        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                                            <div class="d-flex align-items-start gap-3 min-w-0">
+                                                ${thumb}
+                                                <div class="min-w-0">
+                                                    <div class="fw-semibold text-truncate">${title}</div>
+                                                    ${buyerLine}
+                                                </div>
+                                            </div>
+                                            <div class="d-flex flex-wrap gap-2">
+                                                <button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="tx-open-listing" data-listing-key="db:${escapeAttrForDoubleQuoted(
+                                                    String(lid || ""),
+                                                )}">View listing</button>
+                                                ${chatBtn}
+                                                ${buyerBtn}
+                                            </div>
+                                        </div>
+                                   </div>`;
+                        })
+                        .join("")}
+                </div>
+           </div>`
         : "";
+
+    const sellingHtml = "";
+
+    const activeHtml = activeRows.length
+        ? `<h2 class="h6 text-uppercase cdm-muted small mb-3" style="letter-spacing:0.06em;">Active</h2>${activeRows
+              .map(listingCardApiHtml)
+              .join("")}`
+        : `<div class="cdm-card p-4 cdm-muted mb-4">No active listings right now.</div>`;
+
+    const soldHtml = soldRows.length
+        ? `<h2 class="h6 text-uppercase cdm-muted small mt-4 mb-3" style="letter-spacing:0.06em;">Sold</h2>${soldRows
+              .map(listingCardApiHtml)
+              .join("")}`
+        : "";
+
+    const otherHtml = otherRows.length
+        ? `<h2 class="h6 text-uppercase cdm-muted small mt-4 mb-3" style="letter-spacing:0.06em;">Other</h2>${otherRows
+              .map(listingCardApiHtml)
+              .join("")}`
+        : "";
+
+    const apiHtml = apiRows.length ? `${claimedListingsHtml}${activeHtml}${soldHtml}${otherHtml}` : "";
     const empty = apiRows.length === 0;
     const bodyHtml = empty
         ? `<div class="cdm-card p-5 text-center cdm-muted">
@@ -8543,64 +8761,23 @@ function showCheckoutError(root, messageHtml) {
 }
 
 function wireCheckoutPage(root) {
-    wireCheckoutPaymentUi(root);
-
-    const selectedBundleKeys = new Set();
-    const addButtons = Array.from(root.querySelectorAll("[data-action='checkout-toggle-bundle']"));
-
-    const updateBundleUi = () => {
-        /** @type {Array<{ key: string, title: string, price: number, listingId: number }>} */
-        const selected = [];
-        addButtons.forEach((btn) => {
-            const key = String(btn.getAttribute("data-listing-key") || "").trim();
-            const listingId = Number(btn.getAttribute("data-listing-id"));
-            const title = String(btn.getAttribute("data-title") || "Item");
-            const price = Number(btn.getAttribute("data-price"));
-            const isSelected = key && selectedBundleKeys.has(key);
-            btn.textContent = isSelected ? "Added" : "Add to checkout";
-            btn.classList.toggle("btn-dark", isSelected);
-            btn.classList.toggle("btn-outline-dark", !isSelected);
-            btn.setAttribute("aria-pressed", isSelected ? "true" : "false");
-            if (isSelected && key && Number.isFinite(price) && price > 0) {
-                selected.push({ key, title, price, listingId });
-            }
-        });
-
-        const countEl = root.querySelector("#checkout-bundle-count");
-        if (countEl) countEl.textContent = String(selected.length);
-        const itemsEl = root.querySelector("#checkout-bundle-items");
-        if (itemsEl) {
-            itemsEl.innerHTML = selected.length
-                ? selected.map((x) => `<div class="small text-muted">+ ${escapeHtml(x.title)} · ${formatUsd(x.price)}</div>`).join("")
-                : `<div class="small text-muted">No add-ons selected yet.</div>`;
-        }
-        const addOnTotal = selected.reduce((s, x) => s + x.price, 0);
-        const baseRaw = Number(root.querySelector("#checkout-base-total")?.getAttribute("data-base-total"));
-        const base = Number.isFinite(baseRaw) ? baseRaw : 0;
-        const totalEl = root.querySelector("#checkout-total-pay");
-        if (totalEl) totalEl.textContent = formatUsd(base + addOnTotal);
-        const confirmBtn = root.querySelector("#checkout-confirm-btn");
-        if (confirmBtn) {
-            const isSale = base > 0;
-            confirmBtn.textContent =
-                selected.length > 0
-                    ? `Confirm ${selected.length + 1} reservations`
-                    : isSale
-                      ? "Confirm purchase"
-                      : "Claim item";
+    const syncCardFields = () => {
+        const method =
+            String(root.querySelector("input[name='checkout-payment-method']:checked")?.value || "cash")
+                .trim()
+                .toLowerCase() === "card"
+                ? "card"
+                : "cash";
+        const fields = root.querySelector("#checkout-card-fields");
+        if (fields) {
+            fields.style.display = method === "card" ? "block" : "none";
         }
     };
 
-    addButtons.forEach((btn) => {
-        btn.addEventListener("click", () => {
-            const key = String(btn.getAttribute("data-listing-key") || "").trim();
-            if (!key) return;
-            if (selectedBundleKeys.has(key)) selectedBundleKeys.delete(key);
-            else selectedBundleKeys.add(key);
-            updateBundleUi();
-        });
+    root.querySelectorAll("input[name='checkout-payment-method']").forEach((el) => {
+        el.addEventListener("change", syncCardFields);
     });
-    updateBundleUi();
+    syncCardFields();
 
     root.querySelector("#checkout-confirm-btn")?.addEventListener("click", async () => {
         const ctx = state.checkoutContext;
@@ -8627,6 +8804,12 @@ function wireCheckoutPage(root) {
 
         const btn = root.querySelector("#checkout-confirm-btn");
         const label = isSale ? "Confirm purchase" : "Claim item";
+        const selectedPaymentMethod =
+            String(root.querySelector("input[name='checkout-payment-method']:checked")?.value || "cash")
+                .trim()
+                .toLowerCase() === "card"
+                ? "card"
+                : "cash";
         let serverBacked = false;
         /** @type {number | null} */
         let savedTransactionId = null;
@@ -8643,19 +8826,17 @@ function wireCheckoutPage(root) {
                 btn.disabled = true;
                 btn.textContent = "Confirming…";
             }
-            const paymentMethod = getSelectedPaymentMethod();
-            const listingIds = Array.from(new Set([listingIdNum, ...getSelectedBundleListingIds()]));
-            for (const targetListingId of listingIds) {
-                let res;
-                let data;
-                try {
-                    ({ res, data } = await apiJson("/api/transactions", {
-                        method: "POST",
-                        body: JSON.stringify({ listingId: targetListingId, paymentMethod }),
-                    }));
-                } catch {
-                    failedReasons.push(formatAuthNetworkError());
-                    continue;
+            let res;
+            let data;
+            try {
+                ({ res, data } = await apiJson("/api/transactions", {
+                    method: "POST",
+                    body: JSON.stringify({ listingId: listingIdNum, paymentMethod: selectedPaymentMethod }),
+                }));
+            } catch {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = label;
                 }
                 if (res.status === 401) {
                     setStoredToken(null);
@@ -8886,11 +9067,48 @@ function renderCheckout() {
         </div>
     `;
 
-    const paymentChoiceHtml = isSale
-        ? `
-        <div class="cdm-checkout-pay-lead small text-muted mb-2">
-            <strong class="text-body">You pay the seller directly.</strong>
-            Bama Marketplace doesn’t charge your card or hold your money. Meet on campus and settle with cash or a peer app — we only save what you pick below for your receipt.
+    const paymentSummaryNote = `
+        <div class="cdm-checkout-payment rounded-3 px-3 py-2 mb-3">
+            <div class="fw-semibold mb-2">Payment</div>
+            <div class="alert alert-info py-2 px-3 mb-2 small" role="note">
+                <strong>Notice:</strong> you can enter payment info now, but <strong>you will not be charged until you receive the item</strong>.
+            </div>
+            <div class="small mb-2" style="color:#6e6e73;">
+                This app records your selection for the transaction. Actual payment happens peer-to-peer after meetup.
+            </div>
+            <div class="d-flex flex-column gap-2">
+                <label class="d-flex align-items-center gap-2 small">
+                    <input type="radio" name="checkout-payment-method" value="cash" checked />
+                    Cash / pay-app (Venmo, Zelle, Cash App)
+                </label>
+                <label class="d-flex align-items-center gap-2 small">
+                    <input type="radio" name="checkout-payment-method" value="card" />
+                    Card (enter now — charged on receipt)
+                </label>
+            </div>
+            <div class="mt-2" id="checkout-card-fields" style="display:none;">
+                <div class="row g-2">
+                    <div class="col-12">
+                        <label class="form-label small mb-1" for="checkout-card-name">Name on card</label>
+                        <input class="form-control form-control-sm" id="checkout-card-name" autocomplete="cc-name" />
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small mb-1" for="checkout-card-number">Card number</label>
+                        <input class="form-control form-control-sm" id="checkout-card-number" inputmode="numeric" autocomplete="cc-number" placeholder="1234 5678 9012 3456" />
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label small mb-1" for="checkout-card-exp">Exp</label>
+                        <input class="form-control form-control-sm" id="checkout-card-exp" autocomplete="cc-exp" placeholder="MM/YY" />
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label small mb-1" for="checkout-card-cvc">CVC</label>
+                        <input class="form-control form-control-sm" id="checkout-card-cvc" inputmode="numeric" autocomplete="cc-csc" placeholder="123" />
+                    </div>
+                </div>
+                <div class="small mt-2" style="color:#6e6e73;">
+                    Demo note: card details are not sent to the API in this assignment build.
+                </div>
+            </div>
         </div>
         <fieldset class="mb-3 border-0 p-0" id="checkout-payment-fieldset" aria-describedby="checkout-payment-desc">
             <legend class="form-label fw-semibold small mb-1">How you’ll pay (saved on your receipt)</legend>
@@ -8999,13 +9217,13 @@ function renderCheckout() {
             <ol class="cdm-checkout-steps">
                 <li><strong>Confirm:</strong> ${
                     persistServer
-                        ? "this listing is reserved for you and hidden from other buyers."
+                        ? "we save this to your account and the listing is marked claimed (reserved) in the database."
                         : signedInNoDbListing
                           ? "open checkout from a live listing on Home (with a listing #) so we can complete the sale."
                           : "we add a note to this browser until you sign in with a live listing."
                 }</li>
-                <li><strong>Messages:</strong> lock in pickup with the seller — day, time, and place.</li>
-                <li><strong>Handoff:</strong> meet, inspect the item, pay the way you agreed, done.</li>
+                <li><strong>Chat:</strong> message the seller to lock in pickup; be specific about day/time.</li>
+                <li><strong>Handoff:</strong> meet up, inspect the item. Then you mark it <strong>received</strong> to complete the transaction.</li>
             </ol>
         </div>
     `;
@@ -9169,26 +9387,7 @@ function renderCheckout() {
                                     ${isSale ? "Confirm purchase" : "Claim item"}
                                 </button>
                                 <button type="button" class="cdm-checkout-cta-secondary" data-action="back-checkout">Cancel</button>
-                                <p class="cdm-checkout-footnote mb-2">
-                                    By confirming you reserve this item. Coordinate pickup and payment with the seller in Messages.
-                                </p>
-                                <details class="small text-muted">
-                                    <summary class="user-select-none">Technical details</summary>
-                                    <p class="mb-1 mt-2">
-                                        ${
-                                            persistServer
-                                                ? "Signed-in checkout is saved to your account through the marketplace API."
-                                                : signedInNoDbListing
-                                                  ? "Checkout needs a live listing id from the feed."
-                                                  : "Without a signed-in live listing, history may stay in this browser only."
-                                        }
-                                    </p>
-                                    ${
-                                        persistServer
-                                            ? `<p class="mb-0 font-monospace small">POST /api/transactions · listing_id ${escapeHtml(String(listingIdNum))}</p>`
-                                            : ""
-                                    }
-                                </details>
+                                
                             </div>
                         </div>
                         <div class="col-12 col-lg-7 order-2 order-lg-1">
@@ -9280,23 +9479,15 @@ function renderCheckoutSuccess() {
                                     : " Saved on this device until you complete a signed-in checkout from the live feed."
                             }
                         </p>
-                        ${saleRef}
-                        ${payLine}
-                        ${bundleNote}
-                        ${partialNote}
-                        ${
-                            s.serverBacked && s.transactionId != null
-                                ? `<details class="text-start small text-muted mb-4 mx-auto" style="max-width: 26rem">
-                            <summary class="user-select-none">Developer / SQL check</summary>
-                            <p class="mb-1 mt-2 font-monospace small">transaction_id = ${escapeHtml(String(s.transactionId))}${
-                                      s.listingId != null ? ` · listing_id = ${escapeHtml(String(s.listingId))}` : ""
-                                  }</p>
-                            <p class="mb-0">Example: <code class="small">SELECT * FROM transactions WHERE transaction_id = ${escapeHtml(String(s.transactionId))};</code></p>
-                        </details>`
-                                : ""
-                        }
-                        <button type="button" class="btn cdm-btn-crimson w-100 cdm-checkout-cta mb-2" id="checkout-success-message">
-                            Message seller
+                        <!-- debug-only MySQL verification card removed -->
+                        <button type="button" class="btn btn-outline-secondary w-100 rounded-pill py-2 mb-2" id="checkout-success-chat" ${
+                            s.serverBacked && Number.isFinite(Number(s.listingId)) && Number(s.listingId) > 0 ? "" : "disabled"
+                        } title="${
+                            s.serverBacked && Number.isFinite(Number(s.listingId)) && Number(s.listingId) > 0
+                                ? "Message the seller"
+                                : "Chat requires a server-backed listing"
+                        }">
+                            Open chat
                         </button>
                         <button type="button" class="btn btn-outline-dark w-100 rounded-pill py-2 mb-2" id="checkout-success-transactions">
                             View my transactions
@@ -9311,27 +9502,206 @@ function renderCheckoutSuccess() {
     root.appendChild(shell);
     wireNav(shell);
     document.getElementById("checkout-success-transactions")?.addEventListener("click", () => navigateTransactions());
-    document.getElementById("checkout-success-message")?.addEventListener("click", () => {
-        const lid = s.listingId != null ? Number(s.listingId) : NaN;
-        const key =
-            s.listingKey != null && String(s.listingKey).trim()
-                ? String(s.listingKey).trim()
-                : Number.isFinite(lid) && lid > 0
-                  ? `db:${lid}`
-                  : "";
-        const sid = s.sellerUserId != null ? Number(s.sellerUserId) : NaN;
-        if (!key || !Number.isFinite(sid) || sid <= 0) {
-            navigateMessages();
+    document.getElementById("checkout-success-chat")?.addEventListener("click", async () => {
+        const listingId = Number(s.listingId);
+        if (!Number.isFinite(listingId) || listingId <= 0) return;
+        if (!state.token) {
+            navigateAuth("login");
             return;
         }
-        openMessagesForListing({
-            listingKey: key,
-            listingTitle: String(s.title || "Listing"),
-            sellerUserId: sid,
-            sellerLabel: String(s.sellerDisplayName || "Seller"),
-        });
+        const btn = document.getElementById("checkout-success-chat");
+        try {
+            btn?.setAttribute("disabled", "true");
+            const res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(String(listingId))}`, {
+                headers: { Accept: "application/json" },
+            });
+            if (!res.ok) throw new Error("listing fetch failed");
+            const L = await res.json();
+            const sellerUserId = Number(L.sellerId ?? L.SellerId);
+            const sellerLabel = String(L.sellerDisplayName ?? L.SellerDisplayName ?? "Seller");
+            openMessagesForListing({
+                listingKey: `db:${listingId}`,
+                listingTitle: String(s.title || "Listing"),
+                sellerUserId,
+                sellerLabel,
+            });
+        } catch {
+            alert("Could not open chat for this purchase.");
+        } finally {
+            btn?.removeAttribute("disabled");
+        }
     });
     ensureAuthUi();
+}
+
+function renderTxAdvanceSuccess() {
+    const root = document.getElementById("app");
+    const s = state.txAdvanceSuccess;
+    root.innerHTML = "";
+    if (!s) {
+        navigate("transactions");
+        return;
+    }
+
+    const ratingPanel = s.rated
+        ? `<div class="cdm-card p-3 mt-3 text-start">
+                <div class="fw-semibold mb-1">Review submitted</div>
+                <div class="cdm-muted small">Thanks — this helps other students trust sellers.</div>
+           </div>`
+        : `<div class="cdm-card p-3 mt-3 text-start">
+                <div class="fw-semibold mb-2">Rate the seller</div>
+                <div class="cdm-muted small mb-3">How was pickup + communication? This updates the seller’s average rating.</div>
+                <form id="advance-rating-form" class="d-grid gap-2">
+                    <label class="small fw-semibold" for="advance-rating-score">Stars</label>
+                    <select id="advance-rating-score" class="form-select">
+                        <option value="5">★★★★★ (5)</option>
+                        <option value="4">★★★★☆ (4)</option>
+                        <option value="3">★★★☆☆ (3)</option>
+                        <option value="2">★★☆☆☆ (2)</option>
+                        <option value="1">★☆☆☆☆ (1)</option>
+                    </select>
+                    <label class="small fw-semibold mt-2" for="advance-rating-comment">Review (optional)</label>
+                    <textarea id="advance-rating-comment" class="form-control" maxlength="500" rows="3" placeholder="Quick note… (optional)"></textarea>
+                    <button class="btn btn-dark rounded-pill mt-2" type="submit" id="advance-rating-submit">
+                        Submit review
+                    </button>
+                    <div class="cdm-muted small" id="advance-rating-hint"></div>
+                </form>
+           </div>`;
+
+    const shell = el(`
+        <div class="cdm-shell cdm-checkout-shell">
+            <nav class="navbar navbar-expand-lg navbar-dark cdm-topbar cdm-navbar-top cdm-checkout-topbar">
+                <div class="container-fluid cdm-max px-3 px-lg-4">
+                    <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="#" data-action="go-home">
+                        <img class="cdm-brand-logo" src="./assets/bama-script-a.png" alt="Bama Marketplace" width="40" height="40" />
+                        <span class="opacity-90">Bama Marketplace</span>
+                    </a>
+                    <button
+                        class="navbar-toggler border border-light border-opacity-50"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#cdmNavAdvanceOk"
+                        aria-controls="cdmNavAdvanceOk"
+                        aria-expanded="false"
+                        aria-label="Toggle navigation"
+                    >
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="cdmNavAdvanceOk">
+                        <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="go-home">Home</a></li>
+                            <li class="nav-item"><a class="nav-link" href="#" data-action="transactions">Transactions</a></li>
+                        </ul>
+                        <div class="d-flex align-items-center gap-2" id="auth-nav-slot"></div>
+                    </div>
+                </div>
+            </nav>
+            <div class="body-content cdm-body-content pb-5">
+                <div class="container-fluid cdm-checkout-max px-3 px-lg-4 pt-4 pb-5">
+                    <div class="cdm-checkout-success-card text-center mx-auto" style="max-width: 30rem">
+                        <div class="cdm-checkout-success-icon mx-auto mb-3" aria-hidden="true">🎉</div>
+                        <h1 class="cdm-checkout-hero-title mb-2">Yay — it’s yours</h1>
+                        <p class="cdm-checkout-hero-kicker mx-auto mb-3">
+                            <span class="fw-semibold text-body">${escapeHtml(String(s.title || "Listing"))}</span>
+                            is now marked <strong>sold</strong>. It moved to <strong>Past &amp; cancelled</strong> in Transactions.
+                        </p>
+                        ${ratingPanel}
+                        <button type="button" class="btn btn-outline-secondary w-100 rounded-pill py-2 mb-2" id="advance-success-chat">
+                            Open chat
+                        </button>
+                        <button type="button" class="btn cdm-btn-crimson w-100 cdm-checkout-cta mb-2" id="advance-success-history">
+                            View past &amp; cancelled
+                        </button>
+                        <button type="button" class="btn btn-link text-decoration-none" data-action="go-home">Keep shopping</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    root.appendChild(shell);
+    wireNav(shell);
+    ensureAuthUi();
+
+    document.getElementById("advance-success-history")?.addEventListener("click", () => {
+        state.txFilter = "history";
+        navigateTransactions();
+    });
+
+    document.getElementById("advance-success-chat")?.addEventListener("click", async () => {
+        const listingId = Number(s.listingId);
+        if (!Number.isFinite(listingId) || listingId <= 0) return;
+        if (!state.token) {
+            navigateAuth("login");
+            return;
+        }
+        const btn = document.getElementById("advance-success-chat");
+        try {
+            btn?.setAttribute("disabled", "true");
+            const res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(String(listingId))}`, {
+                headers: { Accept: "application/json" },
+            });
+            if (!res.ok) throw new Error("listing fetch failed");
+            const L = await res.json();
+            const sellerUserId = Number(L.sellerId ?? L.SellerId);
+            const sellerLabel = String(L.sellerDisplayName ?? L.SellerDisplayName ?? "Seller");
+            openMessagesForListing({
+                listingKey: `db:${listingId}`,
+                listingTitle: String(s.title || "Listing"),
+                sellerUserId,
+                sellerLabel,
+            });
+        } catch {
+            alert("Could not open chat for this purchase.");
+        } finally {
+            btn?.removeAttribute("disabled");
+        }
+    });
+
+    document.getElementById("advance-rating-form")?.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (!state.token) {
+            navigateAuth("login");
+            return;
+        }
+        const tid = Number(s.transactionId);
+        if (!Number.isFinite(tid) || tid <= 0) return;
+        const scoreRaw = /** @type {HTMLSelectElement | null} */ (document.getElementById("advance-rating-score"))?.value;
+        const score = Number(scoreRaw);
+        const comment = String(
+            /** @type {HTMLTextAreaElement | null} */ (document.getElementById("advance-rating-comment"))?.value || "",
+        ).trim();
+        if (!Number.isFinite(score) || score < 1 || score > 5) {
+            alert("Pick a star rating (1–5).");
+            return;
+        }
+
+        const btn = document.getElementById("advance-rating-submit");
+        const hint = document.getElementById("advance-rating-hint");
+        try {
+            btn?.setAttribute("disabled", "true");
+            if (hint) hint.textContent = "Saving…";
+            const res = await fetch(`${API_BASE}/api/transactions/${encodeURIComponent(String(tid))}/rating`, {
+                method: "POST",
+                headers: { Accept: "application/json", "Content-Type": "application/json", ...authHeaders() },
+                body: JSON.stringify({ score, comment: comment || null }),
+            });
+            if (!res.ok) {
+                const txt = await res.text().catch(() => "");
+                alert(txt || `Could not save review (${res.status}).`);
+                if (hint) hint.textContent = "";
+                return;
+            }
+            state.txAdvanceSuccess = { ...s, rated: true };
+            renderTxAdvanceSuccess();
+        } catch {
+            alert("Network error saving review.");
+            if (hint) hint.textContent = "";
+        } finally {
+            btn?.removeAttribute("disabled");
+        }
+    });
 }
 
 function renderTransactions() {
@@ -9414,20 +9784,34 @@ function renderTransactionsMounted(opts) {
     root.innerHTML = "";
 
     if (rows.length === 0) {
-        state.txFilter = "all";
+        state.txFilter = "current";
     }
     const isSellerTab = state.txRole === "sell";
     const nPurchase = rows.filter((r) => r.kind === "purchase").length;
     const nClaim = rows.filter((r) => r.kind === "claim").length;
     const nNeedsAction = rows.filter((r) => String(r.status).toLowerCase() === "awaiting_chat").length;
 
-    const filteredRows =
-        state.txFilter === "action"
-            ? rows.filter((r) => String(r.status).toLowerCase() === "awaiting_chat")
-            : rows;
+    const filteredRows = (function filterTxRows() {
+        const f = String(state.txFilter || "current").toLowerCase();
+        if (f === "action") return rows.filter((r) => String(r.status).toLowerCase() === "awaiting_chat");
+        if (f === "history") {
+            return rows.filter((r) => {
+                const s = String(r.status).toLowerCase();
+                return s === "completed" || s === "cancelled";
+            });
+        }
+        if (f === "all") return rows;
+        // current
+        return rows.filter((r) => {
+            const s = String(r.status).toLowerCase();
+            return s !== "completed" && s !== "cancelled";
+        });
+    })();
 
+    const filterCurrentActive = state.txFilter === "current" ? "is-active" : "";
     const filterAllActive = state.txFilter === "all" ? "is-active" : "";
     const filterActionActive = state.txFilter === "action" ? "is-active" : "";
+    const filterHistoryActive = state.txFilter === "history" ? "is-active" : "";
 
     const needsActionBanner =
         rows.length > 0 && nNeedsAction > 0
@@ -9465,11 +9849,17 @@ function renderTransactionsMounted(opts) {
             ? ""
             : `
         <div class="cdm-tx-filters d-flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Filter transactions">
+            <button type="button" class="cdm-tx-filter-pill ${filterCurrentActive}" data-action="tx-set-filter" data-tx-filter="current" role="tab" aria-selected="${state.txFilter === "current"}">
+                Current
+            </button>
             <button type="button" class="cdm-tx-filter-pill ${filterAllActive}" data-action="tx-set-filter" data-tx-filter="all" role="tab" aria-selected="${state.txFilter === "all"}">
                 All · ${rows.length}
             </button>
             <button type="button" class="cdm-tx-filter-pill ${filterActionActive}" data-action="tx-set-filter" data-tx-filter="action" role="tab" aria-selected="${state.txFilter === "action"}">
                 Needs you${nNeedsAction ? ` · ${nNeedsAction}` : ""}
+            </button>
+            <button type="button" class="cdm-tx-filter-pill ${filterHistoryActive}" data-action="tx-set-filter" data-tx-filter="history" role="tab" aria-selected="${state.txFilter === "history"}">
+                Past &amp; cancelled
             </button>
         </div>
     `;
@@ -9585,90 +9975,23 @@ function renderTransactionsMounted(opts) {
                     t.listingKey && String(t.listingKey).trim()
                         ? `<button type="button" class="btn btn-sm cdm-btn-crimson rounded-pill px-3" data-action="tx-open-listing" data-listing-key="${escapeHtml(String(t.listingKey).trim())}">View listing</button>`
                         : "";
-                const txId = t.transactionId != null && Number.isFinite(Number(t.transactionId)) ? Number(t.transactionId) : null;
-                const rowId = String(t.id || "").trim();
-                const msgSellerBtn =
-                    !isSellerView &&
-                    t.sellerUserId != null &&
-                    Number.isFinite(Number(t.sellerUserId)) &&
-                    Number(t.sellerUserId) > 0 &&
-                    t.listingKey &&
-                    String(t.listingKey).trim()
-                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="tx-msg-seller" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey).trim())}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}" data-seller-id="${escapeAttrForDoubleQuoted(String(t.sellerUserId))}" data-seller-name="${escapeAttrForDoubleQuoted(String(t.sellerDisplayName || "Seller"))}">Message seller</button>`
-                        : "";
-                const msgBuyerBtn =
-                    isSellerView &&
-                    t.buyerUserId != null &&
-                    Number.isFinite(Number(t.buyerUserId)) &&
-                    Number(t.buyerUserId) > 0 &&
-                    t.listingKey &&
-                    String(t.listingKey).trim()
-                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="tx-msg-buyer" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey).trim())}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}" data-buyer-id="${escapeAttrForDoubleQuoted(String(t.buyerUserId))}" data-buyer-name="${escapeAttrForDoubleQuoted(String(t.buyerDisplayName || "Buyer"))}">Message buyer</button>`
-                        : "";
-                const msgFallbackBtn =
-                    !isSellerView && !msgSellerBtn
-                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="nav-messages">Messages</button>`
-                        : "";
-                const msgBuyerFallbackBtn =
-                    isSellerView && !msgBuyerBtn
-                        ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill px-3" data-action="nav-messages">Message buyer</button>`
-                        : "";
-                const canShowConfirm = (txId != null || !t.fromServer) && String(t.status || "").toLowerCase() !== "completed";
-                const actorAlreadyConfirmed = isSellerView ? Boolean(t.sellerConfirmed) : Boolean(t.buyerConfirmed);
-                const confirmLabel = isSellerView ? "Mark handoff done" : "Mark pickup done";
-                const confirmBtn = canShowConfirm
-                    ? `<button
-                            type="button"
-                            class="btn btn-sm btn-outline-success rounded-pill px-3"
-                            data-action="tx-confirm-complete"
-                            data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
-                            data-tx-row-id="${escapeAttrForDoubleQuoted(rowId)}"
-                            data-tx-role="${escapeAttrForDoubleQuoted(String(t.txRole || ""))}"
-                            data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey || ""))}"
-                            data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
-                            data-demo="${t.fromServer ? "false" : "true"}"
-                            ${actorAlreadyConfirmed ? "disabled aria-disabled=\"true\"" : ""}
-                        >${actorAlreadyConfirmed ? "Confirmed by you" : confirmLabel}</button>`
+                const chatBtn =
+                    t.listingId != null && t.listingKey && String(t.listingKey).startsWith("db:")
+                        ? `<button type="button" class="btn btn-sm btn-outline-secondary rounded-pill" data-action="tx-open-chat" data-listing-id="${escapeAttrForDoubleQuoted(String(t.listingId))}" data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey))}" data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}">Open chat</button>`
+                        : `<button type="button" class="btn btn-sm btn-outline-secondary rounded-pill" disabled title="Chat requires a live listing">Open chat</button>`;
+                const advanceDisabled = String(t.status).toLowerCase() === "completed";
+                const advanceBtn = t.fromServer
+                    ? `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="tx-advance" data-transaction-id="${escapeAttrForDoubleQuoted(String(t.transactionId ?? ""))}" ${advanceDisabled ? "disabled" : ""} title="${advanceDisabled ? "Already completed." : "Mark this transaction complete."}">Ready to advance (sold)</button>`
+                    : `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill" disabled title="Server-backed transactions only">Ready to advance</button>`;
+                const releaseStatus = String(t.status).toLowerCase();
+                const releaseDisabled = releaseStatus !== "pending" && releaseStatus !== "awaiting_chat";
+                const releaseBtn = t.fromServer
+                    ? `<button type="button" class="btn btn-sm btn-outline-danger rounded-pill" data-action="tx-release" data-transaction-id="${escapeAttrForDoubleQuoted(String(t.transactionId ?? ""))}" ${releaseDisabled ? "disabled" : ""} title="${releaseDisabled ? "Only pending claims can be released." : "Release this claim and put the listing back on the home feed."}">Release claim</button>`
                     : "";
-                const confirmHint = canShowConfirm ? txConfirmHintHtml(t, isSellerView) : "";
-                const staleWarning =
-                    isSellerView && isPending && inactivityDays >= 15
-                        ? `<div class="alert alert-warning py-2 px-3 small mt-2 mb-0">
-                            <strong>15+ day no-contact warning.</strong>
-                            If this buyer ghosted, move this back to donations so someone else can claim it.
-                        </div>`
-                        : "";
-                const demoSellerRow = isSellerView && !t.fromServer;
-                const moveDonationBtn =
-                    isSellerView &&
-                    (demoSellerRow || (isPending && inactivityDays >= 15)) &&
-                    (txId != null || !t.fromServer) &&
-                    (Number(t.listingId) > 0 || !t.fromServer)
-                        ? `<button
-                            type="button"
-                            class="btn btn-sm btn-outline-warning rounded-pill px-3"
-                            data-action="tx-move-donation"
-                            data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
-                            data-tx-row-id="${escapeAttrForDoubleQuoted(rowId)}"
-                            data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey || ""))}"
-                            data-listing-id="${escapeAttrForDoubleQuoted(String(t.listingId))}"
-                            data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
-                            data-demo="${t.fromServer ? "false" : "true"}"
-                        >Move to donations</button>`
-                        : "";
-                const cancelSaleBtn =
-                    isSellerView && (demoSellerRow || isPending) && (txId != null || !t.fromServer)
-                        ? `<button
-                            type="button"
-                            class="btn btn-sm btn-outline-danger rounded-pill px-3"
-                            data-action="tx-cancel-sale"
-                            data-transaction-id="${escapeAttrForDoubleQuoted(String(txId))}"
-                            data-tx-row-id="${escapeAttrForDoubleQuoted(rowId)}"
-                            data-listing-key="${escapeAttrForDoubleQuoted(String(t.listingKey || ""))}"
-                            data-listing-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}"
-                            data-demo="${t.fromServer ? "false" : "true"}"
-                        >Cancel sale</button>`
-                        : "";
+                const canRate = t.fromServer && String(t.status).toLowerCase() === "completed" && !t.hasRating;
+                const rateBtn = canRate
+                    ? `<button type="button" class="btn btn-sm btn-dark rounded-pill" data-action="tx-rate" data-transaction-id="${escapeAttrForDoubleQuoted(String(t.transactionId ?? ""))}" data-listing-id="${escapeAttrForDoubleQuoted(String(t.listingId ?? ""))}" data-title="${escapeAttrForDoubleQuoted(String(t.title || "Listing"))}">Rate seller</button>`
+                    : "";
                 return `
             <article class="cdm-tx-card mb-3">
                 <div class="cdm-tx-card-statusline">${headline}</div>
@@ -9690,13 +10013,10 @@ function renderTransactionsMounted(opts) {
                 </div>
                 <div class="cdm-tx-actions d-flex flex-wrap gap-2 mt-3 pt-3">
                     ${listingBtn}
-                    ${confirmBtn}
-                    ${cancelSaleBtn}
-                    ${moveDonationBtn}
-                    ${msgSellerBtn}
-                    ${msgBuyerBtn}
-                    ${msgFallbackBtn}
-                    ${msgBuyerFallbackBtn}
+                    ${chatBtn}
+                    ${advanceBtn}
+                    ${releaseBtn}
+                    ${rateBtn}
                 </div>
             </article>
         `;
@@ -9790,6 +10110,135 @@ function renderTransactionsMounted(opts) {
     root.appendChild(shell);
     wireNav(shell);
     ensureAuthUi();
+
+    shell.querySelectorAll("[data-action='tx-open-listing']").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = btn.getAttribute("data-listing-key");
+            if (!key) return;
+            navigateListing(key);
+        });
+    });
+
+    shell.querySelectorAll("[data-action='tx-open-chat']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const listingId = Number(btn.getAttribute("data-listing-id"));
+            const listingKey = String(btn.getAttribute("data-listing-key") || "").trim();
+            const listingTitle = String(btn.getAttribute("data-listing-title") || "Listing").trim();
+            if (!Number.isFinite(listingId) || listingId <= 0 || !listingKey) return;
+
+            // Fetch the listing to get seller id + display name (transactions payload doesn't include seller info).
+            try {
+                btn.setAttribute("disabled", "true");
+                const res = await fetch(`${API_BASE}/api/listings/${encodeURIComponent(String(listingId))}`, {
+                    headers: { Accept: "application/json" },
+                });
+                if (!res.ok) throw new Error("listing fetch failed");
+                const L = await res.json();
+                const sellerUserId = Number(L.sellerId ?? L.SellerId);
+                const sellerLabel = String(L.sellerDisplayName ?? L.SellerDisplayName ?? "Seller");
+                openMessagesForListing({
+                    listingKey,
+                    listingTitle,
+                    sellerUserId,
+                    sellerLabel,
+                });
+            } catch {
+                alert("Could not open chat for this transaction.");
+            } finally {
+                btn.removeAttribute("disabled");
+            }
+        });
+    });
+
+    shell.querySelectorAll("[data-action='tx-advance']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const tid = Number(btn.getAttribute("data-transaction-id"));
+            if (!Number.isFinite(tid) || tid <= 0) return;
+            if (!state.token) {
+                navigateAuth("login");
+                return;
+            }
+            const ok = confirm("Ready to advance to SOLD? This will mark the listing sold and remove it from the home feed.");
+            if (!ok) return;
+            try {
+                btn.setAttribute("disabled", "true");
+                const res = await fetch(`${API_BASE}/api/transactions/${encodeURIComponent(String(tid))}/complete`, {
+                    method: "POST",
+                    headers: { Accept: "application/json", ...authHeaders() },
+                });
+                if (!res.ok) {
+                    const txt = await res.text().catch(() => "");
+                    alert(txt || `Could not advance (${res.status}).`);
+                    return;
+                }
+                // Celebration/confirmation instead of silently dumping to history.
+                const idx = rows.findIndex((r) => Number(r.transactionId) === tid);
+                const guessTitle = idx >= 0 ? rows[idx]?.title : "";
+                const guessListingId = idx >= 0 ? rows[idx]?.listingId : null;
+                state.txAdvanceSuccess = {
+                    title: String(guessTitle || "Listing"),
+                    listingId: Number(guessListingId) || 0,
+                    transactionId: tid,
+                    rated: false,
+                };
+                navigate("tx-advance-success");
+            } catch {
+                alert("Network error advancing transaction.");
+            } finally {
+                btn.removeAttribute("disabled");
+            }
+        });
+    });
+
+    shell.querySelectorAll("[data-action='tx-release']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const tid = Number(btn.getAttribute("data-transaction-id"));
+            if (!Number.isFinite(tid) || tid <= 0) return;
+            if (!state.token) {
+                navigateAuth("login");
+                return;
+            }
+            const ok = confirm("Release this claim? The listing will go back to ACTIVE on the home feed.");
+            if (!ok) return;
+            try {
+                btn.setAttribute("disabled", "true");
+                const res = await fetch(`${API_BASE}/api/transactions/${encodeURIComponent(String(tid))}/release`, {
+                    method: "POST",
+                    headers: { Accept: "application/json", ...authHeaders() },
+                });
+                if (!res.ok) {
+                    const txt = await res.text().catch(() => "");
+                    alert(txt || `Could not release claim (${res.status}).`);
+                    return;
+                }
+                renderTransactions();
+            } catch {
+                alert("Network error releasing claim.");
+            } finally {
+                btn.removeAttribute("disabled");
+            }
+        });
+    });
+
+    shell.querySelectorAll("[data-action='tx-rate']").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const tid = Number(btn.getAttribute("data-transaction-id"));
+            const listingId = Number(btn.getAttribute("data-listing-id"));
+            const title = String(btn.getAttribute("data-title") || "Listing");
+            if (!Number.isFinite(tid) || tid <= 0) return;
+            if (!state.token) {
+                navigateAuth("login");
+                return;
+            }
+            state.txAdvanceSuccess = {
+                title,
+                listingId: Number.isFinite(listingId) ? listingId : 0,
+                transactionId: tid,
+                rated: false,
+            };
+            navigate("tx-advance-success");
+        });
+    });
 }
 
 function renderMessages() {
@@ -9817,8 +10266,12 @@ function renderMessages() {
                   const isActive = active && active.id === row.id;
                   const last = row.messages && row.messages.length ? row.messages[row.messages.length - 1] : null;
                   const preview = last ? escapeHtml(String(last.text || "").slice(0, 68)) : "No messages yet";
+                  const deleteBtn = `<button type="button" class="btn btn-sm ${isActive ? "btn-outline-light" : "btn-outline-danger"} rounded-pill px-2 py-0" data-action="delete-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}" title="Delete chat">✕</button>`;
                   return `<button type="button" class="list-group-item list-group-item-action ${isActive ? "active" : ""}" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}">
-                        <div class="fw-semibold">${escapeHtml(otherLabel)}</div>
+                        <div class="d-flex align-items-center justify-content-between gap-2">
+                          <div class="fw-semibold text-truncate">${escapeHtml(otherLabel)}</div>
+                          <div class="flex-shrink-0">${deleteBtn}</div>
+                        </div>
                         <div class="small ${isActive ? "text-white-50" : "text-muted"}">${escapeHtml(row.listingTitle || "Listing")}</div>
                         <div class="small ${isActive ? "text-white-50" : "text-muted"} text-truncate">${preview}</div>
                     </button>`;
@@ -9869,6 +10322,9 @@ function renderMessages() {
             </nav>
             <div class="body-content cdm-body-content">
                 <div class="container-fluid cdm-max px-3 px-lg-4 py-2">
+                    <button type="button" class="btn btn-link text-decoration-none text-dark px-0 mb-3" data-action="back-to-purchase">
+                        ← Back to purchase
+                    </button>
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                         <div>
                             <h1 class="h3 cdm-title mb-1">Messages</h1>
@@ -9901,11 +10357,34 @@ function renderMessages() {
     wireNav(shell);
     ensureAuthUi();
 
+    shell.querySelector("[data-action='back-to-purchase']")?.addEventListener("click", () => {
+        navigate("transactions");
+    });
+
     shell.querySelectorAll("[data-action='open-message-thread']").forEach((btn) => {
         btn.addEventListener("click", () => {
             const id = btn.getAttribute("data-conversation-id");
             if (!id) return;
             state.messagesActiveConversationId = id;
+            markConversationRead(id);
+            renderMessages();
+        });
+    });
+
+    shell.querySelectorAll("[data-action='delete-message-thread']").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const id = btn.getAttribute("data-conversation-id");
+            if (!id) return;
+            if (!confirm("Delete this chat? This only deletes it from this browser.")) return;
+            const rows = getStoredConversations();
+            const next = rows.filter((r) => r.id !== id);
+            setStoredConversations(next);
+            if (state.messagesActiveConversationId === id) {
+                state.messagesActiveConversationId = next[0]?.id || null;
+            }
+            syncMessagesUnreadBadges(document);
             renderMessages();
         });
     });
@@ -9930,9 +10409,15 @@ function renderMessages() {
         });
         target.updatedAt = new Date().toISOString();
         setStoredConversations(rows);
+        markTxContacted(target.listingKey);
         input.value = "";
         renderMessages();
     });
+
+    if (active?.id) {
+        markConversationRead(active.id);
+    }
+    syncMessagesUnreadBadges(document);
 }
 
 function render() {
@@ -9964,6 +10449,8 @@ function render() {
         renderCheckout();
     } else if (state.view === "checkout-success") {
         renderCheckoutSuccess();
+    } else if (state.view === "tx-advance-success") {
+        renderTxAdvanceSuccess();
     } else if (state.view === "transactions") {
         renderTransactions();
     } else if (state.view === "profile") {
@@ -9979,6 +10466,8 @@ function render() {
         void renderHome();
     }
     syncApiPill();
+    syncMessagesUnreadBadges(document);
+    showMessagesNoticeIfNeeded();
 }
 
 async function checkHealth() {
@@ -10002,6 +10491,30 @@ async function checkHealth() {
 }
 
 clearClientAuthIfJwtDead();
+try {
+    window.history.replaceState(snapshotNavState(), "");
+    window.addEventListener("popstate", (e) => {
+        isRestoringHistoryState = true;
+        try {
+            applyNavState(e.state);
+            render();
+        } finally {
+            isRestoringHistoryState = false;
+        }
+    });
+} catch {
+    // ignore
+}
+try {
+    // Unread + toast across tabs.
+    window.addEventListener("storage", (e) => {
+        if (e.key !== MESSAGES_STORAGE_KEY) return;
+        syncMessagesUnreadBadges(document);
+        showMessagesNoticeIfNeeded();
+    });
+} catch {
+    // ignore
+}
 render();
 checkHealth();
 if (state.token) {

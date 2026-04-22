@@ -226,6 +226,155 @@ public sealed class RatingRepository
     }
 
     /// <summary>
+    /// Creates a rating tied to a completed transaction (buyer → seller).
+    /// Returns null if transaction not completed/not owned, or already rated (unique key).
+    /// Also syncs denormalized columns on users (avg_rating, rating_count) when present.
+    /// </summary>
+    public async Task<UserRatingDto?> CreateForCompletedTransactionAsync(
+        int buyerId,
+        int transactionId,
+        byte score,
+        string? comment,
+        CancellationToken cancellationToken = default)
+    {
+        if (buyerId <= 0 || transactionId <= 0)
+        {
+            return null;
+        }
+
+        await using var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var dbTx = await conn.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            const string selectTxSql = """
+                SELECT transaction_id, listing_id, buyer_id, seller_id, status
+                FROM transactions
+                WHERE transaction_id = @tid
+                FOR UPDATE;
+                """;
+
+            int listingId;
+            int sellerId;
+            string status;
+            int buyerRow;
+
+            await using (var selectCmd = new MySqlCommand(selectTxSql, conn, dbTx))
+            {
+                selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    await dbTx.RollbackAsync(cancellationToken);
+                    return null;
+                }
+
+                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                buyerRow = reader.GetInt32(reader.GetOrdinal("buyer_id"));
+                sellerId = reader.GetInt32(reader.GetOrdinal("seller_id"));
+                status = reader.GetString(reader.GetOrdinal("status"));
+                await reader.CloseAsync();
+            }
+
+            if (buyerRow != buyerId || !string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return null;
+            }
+
+            const string insertSql = """
+                INSERT INTO ratings (listing_id, rater_id, ratee_id, score, comment)
+                VALUES (@lid, @rater, @ratee, @score, @comment);
+                """;
+
+            int ratingId;
+            try
+            {
+                await using (var insertCmd = new MySqlCommand(insertSql, conn, dbTx))
+                {
+                    insertCmd.Parameters.AddWithValue("@lid", listingId);
+                    insertCmd.Parameters.AddWithValue("@rater", buyerId);
+                    insertCmd.Parameters.AddWithValue("@ratee", sellerId);
+                    insertCmd.Parameters.AddWithValue("@score", score);
+                    insertCmd.Parameters.AddWithValue("@comment", comment);
+                    await insertCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+            catch (MySqlException mx) when (mx.Number == 1062)
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return null;
+            }
+
+            await using (var idCmd = new MySqlCommand("SELECT LAST_INSERT_ID();", conn, dbTx))
+            {
+                var scalar = await idCmd.ExecuteScalarAsync(cancellationToken);
+                ratingId = Convert.ToInt32(scalar);
+            }
+
+            // Sync denormalized seller rating columns if schema includes them.
+            const string syncWithFlagSql = """
+                UPDATE users u
+                JOIN (
+                    SELECT ratee_id, AVG(score) AS avg_s, COUNT(*) AS c
+                    FROM ratings
+                    WHERE ratee_id = @uid AND COALESCE(is_flagged, 0) = 0
+                    GROUP BY ratee_id
+                ) x ON x.ratee_id = u.user_id
+                SET u.avg_rating = x.avg_s, u.rating_count = x.c
+                WHERE u.user_id = @uid;
+                """;
+
+            const string syncNoFlagSql = """
+                UPDATE users u
+                JOIN (
+                    SELECT ratee_id, AVG(score) AS avg_s, COUNT(*) AS c
+                    FROM ratings
+                    WHERE ratee_id = @uid
+                    GROUP BY ratee_id
+                ) x ON x.ratee_id = u.user_id
+                SET u.avg_rating = x.avg_s, u.rating_count = x.c
+                WHERE u.user_id = @uid;
+                """;
+
+            try
+            {
+                await using var syncCmd = new MySqlCommand(syncWithFlagSql, conn, dbTx);
+                syncCmd.Parameters.AddWithValue("@uid", sellerId);
+                await syncCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (MySqlException mx) when (mx.Number == 1054)
+            {
+                await using var syncCmd = new MySqlCommand(syncNoFlagSql, conn, dbTx);
+                syncCmd.Parameters.AddWithValue("@uid", sellerId);
+                await syncCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await dbTx.CommitAsync(cancellationToken);
+
+            return new UserRatingDto
+            {
+                RatingId = ratingId,
+                ListingId = listingId,
+                RaterId = buyerId,
+                RaterDisplayName = "",
+                RateeId = sellerId,
+                Score = score,
+                Comment = comment,
+                IsFlagged = false,
+                IsHarsh = false,
+                CreatedAt = DateTime.UtcNow,
+            };
+        }
+        catch
+        {
+            await dbTx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Mid-rank percentile of <c>AVG(score)</c> for <paramref name="sellerUserId"/> vs all distinct <c>ratee_id</c>
     /// with at least <paramref name="minRatingsPerSeller"/> non-flagged ratings (when <c>is_flagged</c> exists).
     /// </summary>

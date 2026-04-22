@@ -24,6 +24,8 @@ public sealed class TransactionListItemDto
     public string PaymentMethod { get; init; } = "cash";
     /// <summary>pending | completed | cancelled</summary>
     public string Status { get; init; } = "pending";
+    /// <summary>True if buyer already left a rating for this transaction's listing/seller.</summary>
+    public bool HasRating { get; init; }
     public DateTime CreatedAt { get; init; }
 
     /// <summary>Set on <c>GET /api/transactions/sales</c> for seller inbox (Messages / coordination).</summary>
@@ -57,4 +59,28 @@ public sealed class CancelTransactionResponse
     public int TransactionId { get; init; }
     public int ListingId { get; init; }
     public string Status { get; init; } = "cancelled";
+}
+
+/// <summary>Seller-side view of an in-progress (claimed) sale.</summary>
+public sealed class SellerSaleListItemDto
+{
+    public int TransactionId { get; init; }
+    public int ListingId { get; init; }
+    public string Title { get; init; } = "";
+    public int BuyerId { get; init; }
+    public string BuyerDisplayName { get; init; } = "";
+    /// <summary>pending | completed | cancelled</summary>
+    public string Status { get; init; } = "pending";
+    public DateTime CreatedAt { get; init; }
+}
+
+public sealed class CreateTransactionRatingRequestDto
+{
+    /// <summary>1–5 stars.</summary>
+    [JsonPropertyName("score")]
+    public byte Score { get; set; }
+
+    /// <summary>Optional review text (max 500 chars).</summary>
+    [JsonPropertyName("comment")]
+    public string? Comment { get; set; }
 }

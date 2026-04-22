@@ -12,10 +12,12 @@ namespace FullstackWithLlm.Api.Controllers;
 public sealed class TransactionsController : ControllerBase
 {
     private readonly TransactionRepository _transactions;
+    private readonly RatingRepository _ratings;
 
-    public TransactionsController(TransactionRepository transactions)
+    public TransactionsController(TransactionRepository transactions, RatingRepository ratings)
     {
         _transactions = transactions;
+        _ratings = ratings;
     }
 
     /// <summary>Buyer&apos;s transactions (paid buys and free claims), newest first.</summary>
@@ -36,25 +38,25 @@ public sealed class TransactionsController : ControllerBase
         return Ok(rows);
     }
 
-    /// <summary>Seller&apos;s sales (same newest-first list; includes buyer id/name for pickup coordination).</summary>
-    [HttpGet("sales")]
-    [ProducesResponseType(typeof(IReadOnlyList<TransactionListItemDto>), StatusCodes.Status200OK)]
+    /// <summary>Seller's in-progress (claimed) sales, newest first.</summary>
+    [HttpGet("selling")]
+    [ProducesResponseType(typeof(IReadOnlyList<SellerSaleListItemDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<ActionResult<IReadOnlyList<TransactionListItemDto>>> GetMySales(
+    public async Task<ActionResult<IReadOnlyList<SellerSaleListItemDto>>> GetSelling(
         [FromQuery] int limit = 48,
         CancellationToken cancellationToken = default)
     {
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        if (!int.TryParse(idRaw, out var sellerId) || sellerId <= 0)
         {
             return Unauthorized();
         }
 
-        var rows = await _transactions.GetMineAsSellerAsync(userId, limit, cancellationToken);
+        var rows = await _transactions.GetMineAsSellerAsync(sellerId, limit, cancellationToken);
         return Ok(rows);
     }
 
-    /// <summary>Complete checkout: creates a row in <c>transactions</c> and marks the listing <c>sold</c>.</summary>
+    /// <summary>Checkout: creates a row in <c>transactions</c> and marks the listing <c>claimed</c> (reserved).</summary>
     [HttpPost]
     [ProducesResponseType(typeof(TransactionListItemDto), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -92,115 +94,93 @@ public sealed class TransactionsController : ControllerBase
     }
 
     /// <summary>
-    /// Buyer or seller confirms handoff done. Marks transaction completed once both sides confirm.
+    /// Buyer marks item received: completes the pending transaction and flips the listing to sold.
+    /// This is when an eventual payment capture would occur in a real processor integration.
     /// </summary>
-    [HttpPost("{transactionId:int}/confirm")]
+    [HttpPost("{id:int}/complete")]
     [ProducesResponseType(typeof(TransactionListItemDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<TransactionListItemDto>> ConfirmCompletion(
-        [FromRoute] int transactionId,
+    public async Task<ActionResult<TransactionListItemDto>> CompleteOnReceipt(
+        int id,
         CancellationToken cancellationToken = default)
     {
-        if (transactionId <= 0)
-        {
-            return NotFound();
-        }
-
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        if (!int.TryParse(idRaw, out var buyerId) || buyerId <= 0)
         {
             return Unauthorized();
         }
 
-        var result = await _transactions.ConfirmCompletionAsync(transactionId, userId, cancellationToken);
-        return result.Outcome switch
+        var row = await _transactions.CompleteOnReceiptAsync(buyerId, id, cancellationToken);
+        if (row is null)
         {
-            TransactionRepository.ConfirmCompletionOutcome.NotFound => NotFound("Transaction not found."),
-            TransactionRepository.ConfirmCompletionOutcome.Forbidden => Forbid(),
-            TransactionRepository.ConfirmCompletionOutcome.Conflict => Conflict("This transaction can’t be confirmed in its current state."),
-            _ when result.Row is not null => Ok(result.Row),
-            _ => StatusCode(StatusCodes.Status500InternalServerError, "Could not confirm transaction."),
-        };
+            return Conflict("That transaction cannot be completed (not pending, not yours, or listing not claimed).");
+        }
+
+        return Ok(row);
     }
 
-    /// <summary>
-    /// Seller-only: after prolonged inactivity, cancel the stale sale and relist the item as a donation (price 0, active).
-    /// </summary>
-    [HttpPost("{transactionId:int}/move-to-donations")]
-    [ProducesResponseType(typeof(MoveTransactionToDonationResponse), StatusCodes.Status200OK)]
+    /// <summary>Buyer releases claim: cancels the pending transaction and flips the listing back to active.</summary>
+    [HttpPost("{id:int}/release")]
+    [ProducesResponseType(typeof(TransactionListItemDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<MoveTransactionToDonationResponse>> MoveToDonations(
-        [FromRoute] int transactionId,
+    public async Task<ActionResult<TransactionListItemDto>> ReleaseClaim(
+        int id,
         CancellationToken cancellationToken = default)
     {
-        if (transactionId <= 0)
-        {
-            return NotFound();
-        }
-
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        if (!int.TryParse(idRaw, out var buyerId) || buyerId <= 0)
         {
             return Unauthorized();
         }
 
-        var result = await _transactions.MoveStaleSaleToDonationAsync(transactionId, userId, 15, cancellationToken);
-        return result.Outcome switch
+        var row = await _transactions.ReleaseClaimAsync(buyerId, id, cancellationToken);
+        if (row is null)
         {
-            TransactionRepository.MoveToDonationOutcome.NotFound => NotFound("Transaction not found."),
-            TransactionRepository.MoveToDonationOutcome.Forbidden => Forbid(),
-            TransactionRepository.MoveToDonationOutcome.Conflict => Conflict("This sale is not eligible to move yet (must be pending and inactive for 15+ days)."),
-            _ => Ok(new MoveTransactionToDonationResponse
-            {
-                TransactionId = result.TransactionId,
-                ListingId = result.ListingId,
-                Status = "cancelled",
-            }),
-        };
+            return Conflict("That claim cannot be released (not pending, not yours, or listing not claimed).");
+        }
+
+        return Ok(row);
     }
 
-    /// <summary>
-    /// Seller-only: cancel a pending transaction and relist the item as active so another buyer can purchase it.
-    /// </summary>
-    [HttpPost("{transactionId:int}/cancel-by-seller")]
-    [ProducesResponseType(typeof(CancelTransactionResponse), StatusCodes.Status200OK)]
+    /// <summary>Buyer rates the seller after completion (one review per transaction/listing pair).</summary>
+    [HttpPost("{id:int}/rating")]
+    [ProducesResponseType(typeof(UserRatingDto), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<CancelTransactionResponse>> CancelBySeller(
-        [FromRoute] int transactionId,
+    public async Task<ActionResult<UserRatingDto>> CreateRating(
+        int id,
+        [FromBody] CreateTransactionRatingRequestDto request,
         CancellationToken cancellationToken = default)
     {
-        if (transactionId <= 0)
-        {
-            return NotFound();
-        }
-
         var idRaw = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idRaw, out var userId) || userId <= 0)
+        if (!int.TryParse(idRaw, out var buyerId) || buyerId <= 0)
         {
             return Unauthorized();
         }
 
-        var result = await _transactions.CancelPendingBySellerAsync(transactionId, userId, cancellationToken);
-        return result.Outcome switch
+        var score = request.Score;
+        if (score is < 1 or > 5)
         {
-            TransactionRepository.CancelBySellerOutcome.NotFound => NotFound("Transaction not found."),
-            TransactionRepository.CancelBySellerOutcome.Forbidden => Forbid(),
-            TransactionRepository.CancelBySellerOutcome.Conflict => Conflict("Only pending unconfirmed sales can be cancelled by seller."),
-            _ => Ok(new CancelTransactionResponse
-            {
-                TransactionId = result.TransactionId,
-                ListingId = result.ListingId,
-                Status = "cancelled",
-            }),
-        };
+            return BadRequest("Score must be between 1 and 5.");
+        }
+
+        var comment = request.Comment;
+        if (comment != null)
+        {
+            comment = comment.Trim();
+            if (comment.Length == 0) comment = null;
+            if (comment != null && comment.Length > 500) comment = comment[..500];
+        }
+
+        var created = await _ratings.CreateForCompletedTransactionAsync(buyerId, id, score, comment, cancellationToken);
+        if (created is null)
+        {
+            return Conflict("That rating cannot be saved (not completed, not yours, or already rated).");
+        }
+
+        return StatusCode(StatusCodes.Status201Created, created);
     }
 }
