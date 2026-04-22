@@ -9187,6 +9187,7 @@ function renderMessages() {
         navigateAuth("login");
         return;
     }
+
     const all = getStoredConversations();
     const mine = all
         .filter((row) => Number(row.buyerUserId) === myUserId || Number(row.sellerUserId) === myUserId)
@@ -9204,34 +9205,29 @@ function renderMessages() {
                   const isActive = active && active.id === row.id;
                   const last = row.messages && row.messages.length ? row.messages[row.messages.length - 1] : null;
                   const preview = last ? escapeHtml(String(last.text || "").slice(0, 68)) : "No messages yet";
-                  const deleteBtn = `<button type="button" class="btn btn-sm ${isActive ? "btn-outline-light" : "btn-outline-danger"} rounded-pill px-2 py-0" data-action="delete-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}" title="Delete chat">✕</button>`;
-                  return `<button type="button" class="list-group-item list-group-item-action ${isActive ? "active" : ""}" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}">
-                        <div class="d-flex align-items-center justify-content-between gap-2">
-                          <div class="fw-semibold text-truncate">${escapeHtml(otherLabel)}</div>
-                          <div class="flex-shrink-0">${deleteBtn}</div>
-                        </div>
-                        <div class="small ${isActive ? "text-white-50" : "text-muted"}">${escapeHtml(row.listingTitle || "Listing")}</div>
-                        <div class="small ${isActive ? "text-white-50" : "text-muted"} text-truncate">${preview}</div>
+                  return `<button type="button" class="cdm-msg-thread ${isActive ? "is-active" : ""}" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}">
+                        <div class="cdm-msg-thread-name text-truncate">${escapeHtml(otherLabel)}</div>
+                        <div class="cdm-msg-thread-listing text-truncate">${escapeHtml(row.listingTitle || "Listing")}</div>
+                        <div class="cdm-msg-thread-preview text-truncate">${preview}</div>
                     </button>`;
               })
               .join("")
-        : `<div class="cdm-card p-4 cdm-muted small">No conversations yet. Open a listing and tap <strong>Message seller</strong> to start.</div>`;
+        : `<div class="cdm-msg-empty">No conversations yet. Use <strong>Message seller</strong> on a listing to start one.</div>`;
 
     const messagesHtml = active
         ? active.messages.length
             ? active.messages
                   .map((m) => {
                       const mineMsg = Number(m.senderUserId) === myUserId;
-                      return `<div class="d-flex ${mineMsg ? "justify-content-end" : "justify-content-start"} mb-2">
-                            <div class="px-3 py-2 rounded-3 ${mineMsg ? "bg-dark text-white" : "bg-light border"}" style="max-width: 78%;">
-                                <div class="small ${mineMsg ? "text-white-50" : "text-muted"} mb-1">${escapeHtml(m.senderLabel || "User")}</div>
-                                <div>${escapeHtml(m.text || "")}</div>
+                      return `<div class="cdm-msg-row ${mineMsg ? "is-sent" : "is-received"}">
+                            <div class="cdm-msg-bubble">
+                                <div class="cdm-msg-text">${escapeHtml(m.text || "")}</div>
                             </div>
                         </div>`;
                   })
                   .join("")
-            : `<div class="cdm-card p-3 cdm-muted small">No messages yet. Say hello and coordinate pickup details.</div>`
-        : `<div class="cdm-card p-4 cdm-muted small">Select a conversation to view messages.</div>`;
+            : `<div class="cdm-msg-empty">No messages yet. Say hello.</div>`
+        : `<div class="cdm-msg-empty">Select a conversation to view messages.</div>`;
     const otherLabel = active
         ? Number(active.sellerUserId) === myUserId
             ? active.buyerLabel || `User #${active.buyerUserId}`
@@ -9266,26 +9262,26 @@ function renderMessages() {
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                         <div>
                             <h1 class="h3 cdm-title mb-1">Messages</h1>
-                            <p class="cdm-muted small mb-0">Current and past conversations with buyers and sellers.</p>
+                            <p class="cdm-muted small mb-0">Messages and Message seller both route here.</p>
                         </div>
                     </div>
-                    <div class="row g-3">
-                        <div class="col-12 col-lg-4">
-                            <div class="list-group">${listHtml}</div>
-                        </div>
-                        <div class="col-12 col-lg-8">
-                            <div class="cdm-card p-3">
-                                <div class="fw-semibold mb-2">${escapeHtml(otherLabel)}</div>
-                                <div class="border rounded-3 p-3 mb-3" style="min-height: 280px; max-height: 420px; overflow-y: auto;">
-                                    ${messagesHtml}
-                                </div>
-                                <form id="messages-form" class="d-flex gap-2">
-                                    <input id="messages-input" class="form-control" type="text" maxlength="600" placeholder="Write a message…" ${active ? "" : "disabled"} />
-                                    <button class="btn cdm-btn-crimson" type="submit" ${active ? "" : "disabled"}>Send</button>
-                                </form>
+                    <section id="messaging-app-container" aria-label="Messages">
+                        <aside class="cdm-msg-sidebar" aria-label="Conversations">
+                            <div class="cdm-msg-sidebar-head">Conversations</div>
+                            <div class="cdm-msg-thread-list">${listHtml}</div>
+                        </aside>
+                        <section id="chat-window" aria-label="Active chat">
+                            <div class="cdm-msg-main-head">${escapeHtml(otherLabel)}</div>
+                            <div class="cdm-msg-main-subhead">${escapeHtml(active?.listingTitle || "Select a conversation to start chatting")}</div>
+                            <div id="messages-scroll-region" class="cdm-msg-log" role="log" aria-live="polite">
+                                ${messagesHtml}
                             </div>
-                        </div>
-                    </div>
+                            <form id="messages-form" class="cdm-msg-compose">
+                                <input id="messages-input" class="cdm-msg-input" type="text" maxlength="600" placeholder="Type a message..." ${active ? "" : "disabled"} />
+                                <button class="cdm-msg-send" type="submit" ${active ? "" : "disabled"} aria-label="Send message" title="Send">➤</button>
+                            </form>
+                        </section>
+                    </section>
                 </div>
             </div>
         </div>
@@ -9307,26 +9303,14 @@ function renderMessages() {
             renderMessages();
         });
     });
-
-    shell.querySelectorAll("[data-action='delete-message-thread']").forEach((btn) => {
-        btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const id = btn.getAttribute("data-conversation-id");
-            if (!id) return;
-            if (!confirm("Delete this chat? This only deletes it from this browser.")) return;
-            const rows = getStoredConversations();
-            const next = rows.filter((r) => r.id !== id);
-            setStoredConversations(next);
-            if (state.messagesActiveConversationId === id) {
-                state.messagesActiveConversationId = next[0]?.id || null;
-            }
-            syncMessagesUnreadBadges(document);
-            renderMessages();
-        });
-    });
     const form = shell.querySelector("#messages-form");
     const input = shell.querySelector("#messages-input");
+    const log = shell.querySelector("#messages-scroll-region");
+    if (log instanceof HTMLElement) {
+        requestAnimationFrame(() => {
+            log.scrollTop = log.scrollHeight;
+        });
+    }
     form?.addEventListener("submit", (e) => {
         e.preventDefault();
         if (!(input instanceof HTMLInputElement)) return;
@@ -9350,7 +9334,6 @@ function renderMessages() {
         input.value = "";
         renderMessages();
     });
-
     if (active?.id) {
         markConversationRead(active.id);
     }
