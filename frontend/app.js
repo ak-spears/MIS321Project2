@@ -10938,14 +10938,20 @@ function renderMessages() {
                   const last = row.messages && row.messages.length ? row.messages[row.messages.length - 1] : null;
                   const preview = last ? escapeHtml(String(last.text || "").slice(0, 68)) : "No messages yet";
                   const deleteBtn = `<button type="button" class="btn btn-sm ${isActive ? "btn-outline-light" : "btn-outline-danger"} rounded-pill px-2 py-0" data-action="delete-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}" title="Delete chat">✕</button>`;
-                  return `<button type="button" class="list-group-item list-group-item-action ${isActive ? "active" : ""}" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}">
-                        <div class="d-flex align-items-center justify-content-between gap-2">
-                          <div class="fw-semibold text-truncate">${escapeHtml(otherLabel)}</div>
-                          <div class="flex-shrink-0">${deleteBtn}</div>
+                  const openBtn = `<button type="button" class="btn btn-sm ${isActive ? "btn-outline-light" : "btn-outline-secondary"} rounded-pill px-2 py-0" data-action="open-message-thread" data-conversation-id="${escapeAttrForDoubleQuoted(row.id)}" title="Open chat">Open</button>`;
+                  return `<div class="list-group-item ${isActive ? "active" : ""}">
+                        <div class="d-flex align-items-start justify-content-between gap-2">
+                          <div class="min-w-0">
+                            <div class="fw-semibold text-truncate">${escapeHtml(otherLabel)}</div>
+                            <div class="small ${isActive ? "text-white-50" : "text-muted"}">${escapeHtml(row.listingTitle || "Listing")}</div>
+                            <div class="small ${isActive ? "text-white-50" : "text-muted"} text-truncate">${preview}</div>
+                          </div>
+                          <div class="d-flex gap-2 flex-shrink-0">
+                            ${openBtn}
+                            ${deleteBtn}
+                          </div>
                         </div>
-                        <div class="small ${isActive ? "text-white-50" : "text-muted"}">${escapeHtml(row.listingTitle || "Listing")}</div>
-                        <div class="small ${isActive ? "text-white-50" : "text-muted"} text-truncate">${preview}</div>
-                    </button>`;
+                    </div>`;
               })
               .join("")
         : `<div class="cdm-card p-4 cdm-muted small">No conversations yet. Open a listing and tap <strong>Message seller</strong> to start.</div>`;
