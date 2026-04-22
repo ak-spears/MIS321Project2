@@ -6,5 +6,9 @@
 **/bin/
 **/obj/
 
+# Ad-hoc dotnet -o / temp compile dirs (e.g. when main exe is file-locked)
+**/_compile_out/
+**/compile-obj-tmp*/
+
 # OS
 .DS_Store
