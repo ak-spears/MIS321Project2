@@ -300,13 +300,14 @@ public sealed class ListingRepository
 
         var ordObo = reader.GetOrdinal("or_best_offer");
         var orBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo));
+        var title = reader.GetString(reader.GetOrdinal("title"));
 
         return new ListingFeedItemDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
             SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
             CampusId = reader.GetInt32(reader.GetOrdinal("campus_id")),
-            Title = reader.GetString(reader.GetOrdinal("title")),
+            Title = title,
             Description = reader.IsDBNull(reader.GetOrdinal("description"))
                 ? null
                 : reader.GetString(reader.GetOrdinal("description")),
@@ -316,7 +317,7 @@ public sealed class ListingRepository
             GapSolution = reader.IsDBNull(ordGap) ? null : reader.GetString(ordGap),
             SpaceSuitability = spaceSuitability,
             OrBestOffer = orBestOffer,
-            ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
+            ImageUrl = ReadImageUrlOrFallback(reader, title),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
             CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
@@ -327,12 +328,13 @@ public sealed class ListingRepository
     {
         var ordObo = reader.GetOrdinal("or_best_offer");
         var orBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo));
+        var title = reader.GetString(reader.GetOrdinal("title"));
         return new ListingFeedItemDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
             SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
             CampusId = reader.GetInt32(reader.GetOrdinal("campus_id")),
-            Title = reader.GetString(reader.GetOrdinal("title")),
+            Title = title,
             Description = reader.IsDBNull(reader.GetOrdinal("description"))
                 ? null
                 : reader.GetString(reader.GetOrdinal("description")),
@@ -342,7 +344,7 @@ public sealed class ListingRepository
             GapSolution = null,
             SpaceSuitability = null,
             OrBestOffer = orBestOffer,
-            ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
+            ImageUrl = ReadImageUrlOrFallback(reader, title),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
             CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
@@ -1038,12 +1040,13 @@ public sealed class ListingRepository
         var ordDel = reader.GetOrdinal("delivery_notes");
         var ordSpace = reader.GetOrdinal("space_suitability");
         var ordObo = reader.GetOrdinal("or_best_offer");
+        var title = reader.GetString(reader.GetOrdinal("title"));
 
         return new ListingDetailDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
             SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
-            Title = reader.GetString(reader.GetOrdinal("title")),
+            Title = title,
             Description = reader.IsDBNull(reader.GetOrdinal("description"))
                 ? null
                 : reader.GetString(reader.GetOrdinal("description")),
@@ -1059,7 +1062,7 @@ public sealed class ListingRepository
             DeliveryNotes = reader.IsDBNull(ordDel) ? null : reader.GetString(ordDel),
             SpaceSuitability = reader.IsDBNull(ordSpace) ? null : reader.GetString(ordSpace),
             OrBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo)),
-            ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
+            ImageUrl = ReadImageUrlOrFallback(reader, title),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
             CreatedAt = reader.IsDBNull(reader.GetOrdinal("created_at")) ? null : reader.GetDateTime(reader.GetOrdinal("created_at")),
@@ -1100,11 +1103,12 @@ public sealed class ListingRepository
         }
 
         var ordObo = reader.GetOrdinal("or_best_offer");
+        var title = reader.GetString(reader.GetOrdinal("title"));
         return new ListingDetailDto
         {
             ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
             SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
-            Title = reader.GetString(reader.GetOrdinal("title")),
+            Title = title,
             Description = reader.IsDBNull(reader.GetOrdinal("description"))
                 ? null
                 : reader.GetString(reader.GetOrdinal("description")),
@@ -1120,10 +1124,51 @@ public sealed class ListingRepository
             DeliveryNotes = null,
             SpaceSuitability = null,
             OrBestOffer = !reader.IsDBNull(ordObo) && Convert.ToBoolean(reader.GetValue(ordObo)),
-            ImageUrl = reader.IsDBNull(reader.GetOrdinal("image_url")) ? null : reader.GetString(reader.GetOrdinal("image_url")),
+            ImageUrl = ReadImageUrlOrFallback(reader, title),
             Status = reader.GetString(reader.GetOrdinal("status")),
             SellerDisplayName = reader.GetString(reader.GetOrdinal("seller_display_name")),
             CreatedAt = reader.IsDBNull(reader.GetOrdinal("created_at")) ? null : reader.GetDateTime(reader.GetOrdinal("created_at")),
         };
+    }
+
+    private static string ReadImageUrlOrFallback(MySqlDataReader reader, string title)
+    {
+        var ordImage = reader.GetOrdinal("image_url");
+        if (!reader.IsDBNull(ordImage))
+        {
+            var raw = reader.GetString(ordImage);
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                return raw.Trim();
+            }
+        }
+
+        return BuildPlaceholderImageDataUrl(title);
+    }
+
+    private static string BuildPlaceholderImageDataUrl(string? title)
+    {
+        var safeTitle = string.IsNullOrWhiteSpace(title) ? "Listing" : title.Trim();
+        if (safeTitle.Length > 28)
+        {
+            safeTitle = safeTitle[..28];
+        }
+
+        safeTitle = safeTitle.Replace("<", "").Replace(">", "").Replace("&", "").Replace("\"", "");
+        var svg = $$"""
+            <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+              <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#f7dfe4"/>
+                  <stop offset="1" stop-color="#f3f4f6"/>
+                </linearGradient>
+              </defs>
+              <rect width="1200" height="800" fill="url(#g)"/>
+              <rect x="60" y="60" width="1080" height="680" rx="56" fill="rgba(255,255,255,0.55)"/>
+              <text x="120" y="420" font-size="84" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial" font-weight="800" fill="rgba(17,24,39,0.72)">{{safeTitle}}</text>
+            </svg>
+            """;
+
+        return $"data:image/svg+xml;charset=utf-8,{Uri.EscapeDataString(svg)}";
     }
 }
