@@ -28,6 +28,7 @@ builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();
 builder.Services.AddScoped<ListingRepository>();
 builder.Services.AddScoped<TransactionRepository>();
+builder.Services.AddScoped<MessageRepository>();
 builder.Services.AddScoped<AdminRepository>();
 builder.Services.AddScoped<RatingRepository>();
 builder.Services.AddSingleton<JwtTokenService>();
@@ -120,6 +121,20 @@ app.UseExceptionHandler(errorApp =>
 
         if (FindMySqlException(ex) is { } mx)
         {
+            if (mx.Number is 1044 or 1045 or 1142)
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                var detail = app.Environment.IsDevelopment()
+                    ? $"[{mx.ErrorCode}] {mx.Message} The DB user can connect, but lacks required permissions for this operation (messaging needs create/read/write on message tables)."
+                    : "Database permissions are insufficient for this operation.";
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    title = "Database permission error",
+                    detail,
+                });
+                return;
+            }
+
             // BadFieldError = unknown column / schema drift — not a connection outage.
             if (mx.ErrorCode == MySqlErrorCode.BadFieldError || mx.Number == 1054)
             {

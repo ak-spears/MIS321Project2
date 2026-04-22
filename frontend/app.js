@@ -191,6 +191,8 @@ const state = {
     afterLoginIntent: null,
     /** Messages view: selected conversation id. */
     messagesActiveConversationId: /** @type {string | null} */ (null),
+    /** Server-backed conversation cache for badges and messages view. */
+    messagesServerCache: /** @type {MessageConversation[]} */ ([]),
     /** Completion success screen payload (after "Ready to advance"). */
     txAdvanceSuccess:
         /** @type {null | { title: string, listingId: number, transactionId: number, rated?: boolean }} */ (null),
@@ -1636,8 +1638,11 @@ function parseJwtSub(token) {
     try {
         const parts = token.split(".");
         if (parts.length < 2) return null;
-        const json = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
-        const n = parseInt(String(json.sub ?? ""), 10);
+        const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+        const json = JSON.parse(atob(padded));
+        const rawId = json.sub ?? json.nameid ?? json.user_id ?? json.uid ?? "";
+        const n = parseInt(String(rawId), 10);
         return Number.isFinite(n) && n > 0 ? n : null;
     } catch {
         return null;
@@ -1670,19 +1675,12 @@ function parseJwtSub(token) {
 
 /** @returns {MessageConversation[]} */
 function getStoredConversations() {
-    try {
-        const raw = localStorage.getItem(MESSAGES_STORAGE_KEY);
-        if (!raw) return [];
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
+    return Array.isArray(state.messagesServerCache) ? state.messagesServerCache : [];
 }
 
 /** @param {MessageConversation[]} rows */
 function setStoredConversations(rows) {
-    localStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(rows));
+    state.messagesServerCache = Array.isArray(rows) ? rows : [];
 }
 
 function getUnreadConversationCount() {
@@ -1717,6 +1715,7 @@ function markConversationRead(conversationId) {
     conv.lastReadAtByUserId = conv.lastReadAtByUserId && typeof conv.lastReadAtByUserId === "object" ? conv.lastReadAtByUserId : {};
     conv.lastReadAtByUserId[String(myUserId)] = new Date().toISOString();
     setStoredConversations(rows);
+    void markServerConversationRead(conversationId);
 }
 
 function syncMessagesUnreadBadges(root = document) {
@@ -1734,6 +1733,7 @@ function syncMessagesUnreadBadges(root = document) {
 }
 
 let lastUnreadConversationCount = 0;
+let lastMessagesOpenError = "";
 function showMessagesNoticeIfNeeded() {
     const n = getUnreadConversationCount();
     if (n > lastUnreadConversationCount) {
@@ -1769,50 +1769,116 @@ function showToastNotice(text) {
     }, 2600);
 }
 
+function parseListingIdFromListingKey(listingKey) {
+    const key = String(listingKey || "").trim();
+    if (!key) return null;
+    if (key.startsWith("db:")) {
+        const n = Number(key.slice(3));
+        return Number.isFinite(n) && n > 0 ? n : null;
+    }
+    const n = Number(key);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function mapServerConversation(conv) {
+    return {
+        id: String(conv.id || ""),
+        listingKey: String(conv.listingKey || ""),
+        listingTitle: String(conv.listingTitle || "Listing"),
+        sellerUserId: Number(conv.sellerUserId || 0),
+        sellerLabel: String(conv.sellerLabel || ""),
+        buyerUserId: Number(conv.buyerUserId || 0),
+        buyerLabel: String(conv.buyerLabel || ""),
+        lastReadAtByUserId:
+            conv.lastReadAtByUserId && typeof conv.lastReadAtByUserId === "object"
+                ? conv.lastReadAtByUserId
+                : {},
+        updatedAt: String(conv.updatedAt || new Date().toISOString()),
+        messages: Array.isArray(conv.messages)
+            ? conv.messages.map((m) => ({
+                  senderUserId: Number(m.senderUserId || 0),
+                  senderLabel: String(m.senderLabel || "User"),
+                  text: String(m.text || ""),
+                  createdAt: String(m.createdAt || new Date().toISOString()),
+              }))
+            : [],
+    };
+}
+
+async function fetchServerConversations() {
+    if (!state.token) return [];
+    const { res, data } = await apiJson("/api/messages/conversations", { method: "GET" });
+    if (!res.ok || !Array.isArray(data)) return [];
+    return data.map(mapServerConversation);
+}
+
+async function openServerConversation(payload) {
+    if (!state.token) return null;
+    const listingId = parseListingIdFromListingKey(payload.listingKey);
+    if (!listingId) {
+        lastMessagesOpenError = "This listing is missing a valid database id.";
+        return null;
+    }
+    const body = {
+        listingId,
+        listingKey: String(payload.listingKey || ""),
+        listingTitle: String(payload.listingTitle || "Listing"),
+        sellerUserId: Number(payload.sellerUserId || 0),
+        sellerLabel: String(payload.sellerLabel || ""),
+        buyerUserId: Number(payload.buyerUserId || 0),
+        buyerLabel: String(payload.buyerLabel || ""),
+    };
+    const { res, data } = await apiJson("/api/messages/open", {
+        method: "POST",
+        body: JSON.stringify(body),
+    });
+    if (!res.ok || !data || typeof data !== "object") {
+        const detail =
+            (data && typeof data === "object" && (data.detail || data.title || data.message)) ||
+            `Request failed (${res.status})`;
+        lastMessagesOpenError = String(detail);
+        return null;
+    }
+    lastMessagesOpenError = "";
+    return mapServerConversation(data);
+}
+
+async function sendServerMessage(conversationId, text) {
+    if (!state.token) return false;
+    const body = { text: String(text || "").trim() };
+    if (!body.text) return false;
+    const { res } = await apiJson(`/api/messages/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        method: "POST",
+        body: JSON.stringify(body),
+    });
+    return res.ok;
+}
+
+async function markServerConversationRead(conversationId) {
+    if (!state.token || !conversationId) return;
+    await apiJson(`/api/messages/conversations/${encodeURIComponent(conversationId)}/read`, {
+        method: "POST",
+        body: JSON.stringify({}),
+    });
+}
+
 /**
  * Ensure a buyer<->seller thread exists for a listing and return it.
  * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
  * @returns {MessageConversation | null}
  */
-function ensureConversationForListing(payload) {
+async function ensureConversationForListing(payload) {
     const buyerUserId = parseJwtSub(state.token);
-    if (buyerUserId == null) return null;
-    if (!Number.isFinite(payload.sellerUserId) || payload.sellerUserId <= 0) return null;
-    if (buyerUserId === payload.sellerUserId) return null;
-    const buyerLabel = state.authEmail || `User #${buyerUserId}`;
-    const listingKey = String(payload.listingKey || "").trim();
-    if (!listingKey) return null;
-
-    const rows = getStoredConversations();
-    const existing = rows.find(
-        (row) =>
-            String(row.listingKey) === listingKey &&
-            Number(row.buyerUserId) === buyerUserId &&
-            Number(row.sellerUserId) === Number(payload.sellerUserId),
-    );
-    if (existing) {
-        if (!existing.buyerLabel && buyerLabel) existing.buyerLabel = buyerLabel;
-        if (!existing.sellerLabel && payload.sellerLabel) existing.sellerLabel = payload.sellerLabel;
-        if (!existing.listingTitle && payload.listingTitle) existing.listingTitle = payload.listingTitle;
-        setStoredConversations(rows);
-        return existing;
+    if (buyerUserId == null) {
+        lastMessagesOpenError = "Your login token could not be read. Please sign out and sign back in.";
+        return null;
     }
-
-    const nowIso = new Date().toISOString();
-    const created = {
-        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        listingKey,
-        listingTitle: String(payload.listingTitle || "Listing"),
-        sellerUserId: Number(payload.sellerUserId),
-        sellerLabel: String(payload.sellerLabel || `User #${payload.sellerUserId}`),
+    const conv = await openServerConversation({
+        ...payload,
         buyerUserId,
-        buyerLabel,
-        updatedAt: nowIso,
-        messages: [],
-    };
-    rows.push(created);
-    setStoredConversations(rows);
-    return created;
+        buyerLabel: state.authEmail || `User #${buyerUserId}`,
+    });
+    return conv;
 }
 
 /**
@@ -1827,66 +1893,24 @@ function ensureConversationForListing(payload) {
  * }} payload
  * @returns {MessageConversation | null}
  */
-function ensureConversationForSale(payload) {
-    const myUserId = parseJwtSub(state.token);
-    if (myUserId == null) return null;
-    const sellerUserId = Number(payload.sellerUserId);
-    const buyerUserId = Number(payload.buyerUserId);
-    if (!Number.isFinite(sellerUserId) || sellerUserId <= 0) return null;
-    if (!Number.isFinite(buyerUserId) || buyerUserId <= 0) return null;
-    if (sellerUserId === buyerUserId) return null;
-    if (myUserId !== sellerUserId && myUserId !== buyerUserId) return null;
-
-    const listingKey = String(payload.listingKey || "").trim();
-    if (!listingKey) return null;
-
-    const sellerLabel = String(payload.sellerLabel || `User #${sellerUserId}`);
-    const buyerLabel = String(payload.buyerLabel || `User #${buyerUserId}`);
-
-    const rows = getStoredConversations();
-    const existing = rows.find(
-        (row) =>
-            String(row.listingKey) === listingKey &&
-            Number(row.buyerUserId) === buyerUserId &&
-            Number(row.sellerUserId) === sellerUserId,
-    );
-    if (existing) {
-        if (!existing.buyerLabel && buyerLabel) existing.buyerLabel = buyerLabel;
-        if (!existing.sellerLabel && sellerLabel) existing.sellerLabel = sellerLabel;
-        if (!existing.listingTitle && payload.listingTitle) existing.listingTitle = payload.listingTitle;
-        setStoredConversations(rows);
-        return existing;
-    }
-
-    const nowIso = new Date().toISOString();
-    const created = {
-        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        listingKey,
-        listingTitle: String(payload.listingTitle || "Listing"),
-        sellerUserId,
-        sellerLabel,
-        buyerUserId,
-        buyerLabel,
-        updatedAt: nowIso,
-        messages: [],
-    };
-    rows.push(created);
-    setStoredConversations(rows);
-    return created;
+async function ensureConversationForSale(payload) {
+    const conv = await openServerConversation(payload);
+    return conv;
 }
 
 /**
  * @param {{ listingKey: string, listingTitle: string, sellerUserId: number, sellerLabel: string }} payload
  */
-function openMessagesForListing(payload) {
+async function openMessagesForListing(payload) {
     if (!isAuthed()) {
         state.afterLoginIntent = { type: "navigate", view: "messages" };
         navigateAuth("login");
         return;
     }
-    const conv = ensureConversationForListing(payload);
+    const conv = await ensureConversationForListing(payload);
     if (!conv) {
-        alert("Could not open messages for this listing.");
+        const detail = lastMessagesOpenError ? `\n\n${lastMessagesOpenError}` : "";
+        alert(`Could not open messages for this listing.${detail}`);
         return;
     }
     state.messagesActiveConversationId = conv.id;
@@ -1904,13 +1928,13 @@ function openMessagesForListing(payload) {
  *  buyerLabel: string
  * }} payload
  */
-function openMessagesForSale(payload) {
+async function openMessagesForSale(payload) {
     if (!isAuthed()) {
         state.afterLoginIntent = { type: "navigate", view: "messages" };
         navigateAuth("login");
         return;
     }
-    const conv = ensureConversationForSale(payload);
+    const conv = await ensureConversationForSale(payload);
     if (!conv) {
         alert("Could not open messages for this sale.");
         return;
@@ -9179,7 +9203,7 @@ function renderTransactionsMounted(rows, opts) {
     });
 }
 
-function renderMessages() {
+async function renderMessages() {
     const root = document.getElementById("app");
     const myUserId = parseJwtSub(state.token);
     if (myUserId == null) {
@@ -9188,10 +9212,8 @@ function renderMessages() {
         return;
     }
 
-    const all = getStoredConversations();
-    const mine = all
-        .filter((row) => Number(row.buyerUserId) === myUserId || Number(row.sellerUserId) === myUserId)
-        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    const mine = await fetchServerConversations();
+    setStoredConversations(mine);
     const chosenId =
         mine.some((row) => row.id === state.messagesActiveConversationId) ? state.messagesActiveConversationId : mine[0]?.id || null;
     state.messagesActiveConversationId = chosenId;
@@ -9300,7 +9322,7 @@ function renderMessages() {
             if (!id) return;
             state.messagesActiveConversationId = id;
             markConversationRead(id);
-            renderMessages();
+            void renderMessages();
         });
     });
     const form = shell.querySelector("#messages-form");
@@ -9316,23 +9338,18 @@ function renderMessages() {
         if (!(input instanceof HTMLInputElement)) return;
         const text = input.value.trim();
         if (!text) return;
-        const me = parseJwtSub(state.token);
-        if (me == null || !state.messagesActiveConversationId) return;
-        const rows = getStoredConversations();
-        const target = rows.find((row) => row.id === state.messagesActiveConversationId);
-        if (!target) return;
-        target.messages = Array.isArray(target.messages) ? target.messages : [];
-        target.messages.push({
-            senderUserId: me,
-            senderLabel: state.authEmail || `User #${me}`,
-            text,
-            createdAt: new Date().toISOString(),
-        });
-        target.updatedAt = new Date().toISOString();
-        setStoredConversations(rows);
-        markTxContacted(target.listingKey);
+        if (!state.messagesActiveConversationId) return;
         input.value = "";
-        renderMessages();
+        void (async () => {
+            const ok = await sendServerMessage(state.messagesActiveConversationId, text);
+            if (!ok) {
+                alert("Could not send message.");
+                return;
+            }
+            const target = mine.find((row) => row.id === state.messagesActiveConversationId);
+            if (target) markTxContacted(target.listingKey);
+            await renderMessages();
+        })();
     });
     if (active?.id) {
         markConversationRead(active.id);
@@ -9376,7 +9393,7 @@ function render() {
     } else if (state.view === "profile") {
         void renderProfile();
     } else if (state.view === "messages") {
-        renderMessages();
+        void renderMessages();
     } else if (state.view === "help" || state.view === "contact" || state.view === "donations") {
         renderStaticSitePage();
     } else if (state.view === "about") {
