@@ -177,12 +177,12 @@ public sealed class ListingsController : ControllerBase
                 "This account is on administrative probation and cannot post or edit listings.");
         }
 
-        var hasOverdueFees = await _transactions.HasOverdueUnpaidFeesAsync(userId, 25m, 30, cancellationToken);
-        if (hasOverdueFees)
+        var unpaid = await _transactions.GetUnpaidPlatformFeesTotalAsync(userId, cancellationToken);
+        if (unpaid >= TransactionRepository.UnpaidFeeBalanceBlockListingsThresholdUsd)
         {
             return StatusCode(
                 StatusCodes.Status403Forbidden,
-                "You have more than $25 in unpaid platform fees older than 30 days. Settle your balance before posting new listings.");
+                $"You have ${unpaid:0.00} in unpaid platform fees (7% of completed sales, owed to the marketplace). At or above ${TransactionRepository.UnpaidFeeBalanceBlockListingsThresholdUsd:0.} you can’t post new listings until the balance is settled.");
         }
 
         var newId = await _listings.InsertAsync(userId, request, cancellationToken);
@@ -257,6 +257,14 @@ public sealed class ListingsController : ControllerBase
             return StatusCode(
                 StatusCodes.Status403Forbidden,
                 "This account is on administrative probation and cannot post or edit listings.");
+        }
+
+        var unpaid = await _transactions.GetUnpaidPlatformFeesTotalAsync(userId, cancellationToken);
+        if (unpaid >= TransactionRepository.UnpaidFeeBalanceBlockListingsThresholdUsd)
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                $"You have ${unpaid:0.00} in unpaid platform fees. At or above ${TransactionRepository.UnpaidFeeBalanceBlockListingsThresholdUsd:0.} you can’t edit or post listings until the balance is settled.");
         }
 
         var ok = await _listings.UpdateMineAsync(userId, id, request, cancellationToken);

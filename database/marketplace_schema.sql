@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     seller_id       INT            NOT NULL,
     amount          DECIMAL(8,2)   NOT NULL DEFAULT 0.00,
     platform_fee    DECIMAL(8,2)   NOT NULL DEFAULT 0.00,
+    obo_seller_ack  TINYINT(1)     NOT NULL DEFAULT 0 COMMENT '1 = seller accepted buyer Or Best Offer price (below list)',
     payment_method  ENUM('cash','card') NOT NULL DEFAULT 'cash',
     status          ENUM('pending','completed','cancelled') NOT NULL DEFAULT 'pending',
     claimed_at      DATETIME       DEFAULT NULL,

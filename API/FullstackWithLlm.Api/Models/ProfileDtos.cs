@@ -17,6 +17,12 @@ public sealed class UserProfileDto
     public string? DefaultGapSolution { get; init; }
     /// <summary>storage | pickup_window | ship_or_deliver — preferred way to receive items when buying.</summary>
     public string? PreferredReceiveGap { get; init; }
+
+    /// <summary>Sum of <c>platform_fee</c> on completed sales that are not marked paid (<c>fee_paid_at</c> null).</summary>
+    public decimal UnpaidPlatformFees { get; init; }
+
+    /// <summary>True when <see cref="UnpaidPlatformFees"/> is at or above the threshold for blocking new listing posts.</summary>
+    public bool FeeBalanceBlocksNewListings { get; init; }
 }
 
 public sealed class UpdateUserProfileRequest

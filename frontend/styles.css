@@ -1549,6 +1549,15 @@ button.cdm-chip {
 
 .cdm-tx-actions {
     border-top: 1px solid rgba(0, 0, 0, 0.06) !important;
+    position: relative;
+    z-index: 2;
+}
+
+.cdm-tx-actions [data-action="tx-move-donation"] {
+    cursor: pointer;
+    position: relative;
+    z-index: 1;
+    pointer-events: auto;
 }
 
 .cdm-tx-eyebrow {

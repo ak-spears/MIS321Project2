@@ -541,6 +541,8 @@ public sealed class UserRepository
             AvatarUrl = ai >= 0 && !r.IsDBNull(ai) ? r.GetString(ai) : null,
             DefaultGapSolution = defaultGap,
             PreferredReceiveGap = preferredReceive,
+            UnpaidPlatformFees = 0m,
+            FeeBalanceBlocksNewListings = false,
         };
     }
 
@@ -820,7 +822,7 @@ public sealed class UserRepository
                 await command.ExecuteNonQueryAsync();
                 return true;
             }
-            catch
+            catch (MySqlException ex) when (IsDuplicateKey(ex))
             {
                 return false;
             }
@@ -828,20 +830,22 @@ public sealed class UserRepository
 
         try
         {
-            if (!await TryInsertAsync(insertSqlWithGap, includeDefaultGap: true))
+            if (await TryInsertAsync(insertSqlWithGap, includeDefaultGap: true))
             {
-                return null;
+                return await ReadLastInsertIdAsync(connection);
             }
+
+            return null;
         }
         catch (MySqlException ex) when (IsUnknownColumnDbError(ex))
         {
-            if (!await TryInsertAsync(insertSqlLegacy, includeDefaultGap: false))
+            if (await TryInsertAsync(insertSqlLegacy, includeDefaultGap: false))
             {
-                return null;
+                return await ReadLastInsertIdAsync(connection);
             }
-        }
 
-        throw new InvalidOperationException("Could not insert user: too many schema adaptation steps.");
+            return null;
+        }
     }
 
     private static void InsertDisplayNameAfterPasswordHash(List<string> columns)

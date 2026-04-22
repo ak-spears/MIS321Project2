@@ -15,12 +15,18 @@ public sealed class UsersController : ControllerBase
     private readonly UserRepository _users;
     private readonly ListingRepository _listings;
     private readonly RatingRepository _ratings;
+    private readonly TransactionRepository _transactions;
 
-    public UsersController(UserRepository users, ListingRepository listings, RatingRepository ratings)
+    public UsersController(
+        UserRepository users,
+        ListingRepository listings,
+        RatingRepository ratings,
+        TransactionRepository transactions)
     {
         _users = users;
         _listings = listings;
         _ratings = ratings;
+        _transactions = transactions;
     }
 
     [Authorize]
@@ -41,7 +47,7 @@ public sealed class UsersController : ControllerBase
             return NotFound();
         }
 
-        return Ok(profile);
+        return Ok(await EnrichProfileWithSellerFeesAsync(userId, profile, cancellationToken));
     }
 
     [Authorize]
@@ -128,7 +134,33 @@ public sealed class UsersController : ControllerBase
             return NotFound();
         }
 
-        return Ok(profile);
+        return Ok(await EnrichProfileWithSellerFeesAsync(userId, profile, cancellationToken));
+    }
+
+    private async Task<UserProfileDto> EnrichProfileWithSellerFeesAsync(
+        int userId,
+        UserProfileDto profile,
+        CancellationToken cancellationToken)
+    {
+        var total = await _transactions.GetUnpaidPlatformFeesTotalAsync(userId, cancellationToken);
+        return new UserProfileDto
+        {
+            UserId = profile.UserId,
+            CampusId = profile.CampusId,
+            Email = profile.Email,
+            DisplayName = profile.DisplayName,
+            Phone = profile.Phone,
+            LivesOnCampus = profile.LivesOnCampus,
+            MoveInDate = profile.MoveInDate,
+            MoveOutDate = profile.MoveOutDate,
+            DormBuilding = profile.DormBuilding,
+            SuiteLetter = profile.SuiteLetter,
+            AvatarUrl = profile.AvatarUrl,
+            DefaultGapSolution = profile.DefaultGapSolution,
+            PreferredReceiveGap = profile.PreferredReceiveGap,
+            UnpaidPlatformFees = total,
+            FeeBalanceBlocksNewListings = total >= TransactionRepository.UnpaidFeeBalanceBlockListingsThresholdUsd,
+        };
     }
 
     [HttpGet("{id:int}/public")]

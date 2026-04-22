@@ -83,28 +83,39 @@ static string? ResolveConnectionString()
     return null;
 }
 
-LoadEnvFromUpwards();
-var cs = args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]) ? args[0].Trim() : ResolveConnectionString();
-if (string.IsNullOrWhiteSpace(cs))
+/// <summary>Runs a .sql file (e.g. catchup) using the same user variables + PREPARE pattern as MySQL Workbench.</summary>
+static int RunSqlFile(string filePath, string connectionString)
 {
-    Console.Error.WriteLine(
-        "No connection string. Set ConnectionStrings__DefaultConnection or DATABASE_URL, " +
-        "or add a .env in this repo (or parent folders) with one of those keys.");
-    return 2;
+    var full = Path.GetFullPath(filePath);
+    if (!File.Exists(full))
+    {
+        Console.Error.WriteLine("File not found: " + full);
+        return 2;
+    }
+
+    var sql = File.ReadAllText(full);
+    var b = new MySqlConnectionStringBuilder(connectionString) { AllowUserVariables = true };
+    using var conn = new MySqlConnection(b.ConnectionString);
+    conn.Open();
+    // Send whole script: server must accept multiple statements in one query (default for MySQL 8+ / connector).
+    using var cmd = new MySqlCommand(sql, conn) { CommandTimeout = 0 };
+    cmd.ExecuteNonQuery();
+    Console.WriteLine("OK: " + full);
+    return 0;
 }
 
-try
+static int RunImageUrlOnlyPatch(string connectionString)
 {
-    await using var conn = new MySqlConnection(cs);
-    await conn.OpenAsync();
+    using var conn = new MySqlConnection(connectionString);
+    conn.Open();
 
     const string checkSql = """
         SELECT COUNT(*) FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'listings' AND COLUMN_NAME = 'image_url'
         """;
-    await using (var check = new MySqlCommand(checkSql, conn))
+    using (var check = new MySqlCommand(checkSql, conn))
     {
-        var n = Convert.ToInt32(await check.ExecuteScalarAsync());
+        var n = Convert.ToInt32(check.ExecuteScalar());
         if (n > 0)
         {
             Console.WriteLine("listings.image_url already exists — nothing to do.");
@@ -112,15 +123,59 @@ try
         }
     }
 
-    await using (var alter = new MySqlCommand(
-                       "ALTER TABLE listings ADD COLUMN image_url MEDIUMTEXT NULL",
-                       conn))
+    using (var alter = new MySqlCommand(
+               "ALTER TABLE listings ADD COLUMN image_url MEDIUMTEXT NULL",
+               conn))
     {
-        await alter.ExecuteNonQueryAsync();
+        alter.ExecuteNonQuery();
     }
 
     Console.WriteLine("Added listings.image_url (MEDIUMTEXT NULL).");
     return 0;
+}
+
+LoadEnvFromUpwards();
+
+// dotnet run --project Tools/Mis321DbPatch -- path\to\catchup_api_schema_idempotent.sql
+// (run from repo root; uses .env DATABASE_URL)
+string? connectionString;
+string? sqlPath = null;
+
+if (args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]))
+{
+    var a0 = args[0].Trim();
+    if (a0.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
+    {
+        var candidate = File.Exists(a0) ? a0 : Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), a0));
+        if (File.Exists(candidate)) sqlPath = candidate;
+    }
+
+    if (sqlPath != null)
+    {
+        connectionString = args.Length > 1 && !string.IsNullOrWhiteSpace(args[1]) ? args[1].Trim() : ResolveConnectionString();
+    }
+    else
+    {
+        connectionString = a0;
+    }
+}
+else
+{
+    connectionString = ResolveConnectionString();
+}
+
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    Console.Error.WriteLine(
+        "No connection string. Set ConnectionStrings__DefaultConnection or DATABASE_URL, " +
+        "or add a .env in the repo with one of those keys.");
+    return 2;
+}
+
+try
+{
+    if (sqlPath != null) return RunSqlFile(sqlPath, connectionString);
+    return RunImageUrlOnlyPatch(connectionString);
 }
 catch (Exception ex)
 {

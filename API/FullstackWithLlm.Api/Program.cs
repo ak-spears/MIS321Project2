@@ -17,13 +17,20 @@ var builder = WebApplication.CreateBuilder(args);
 DatabaseUrlResolver.ApplyIfNeeded(builder.Configuration);
 LocalDevConnectionStringFix.Apply(builder);
 
+var defaultConn = builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(defaultConn))
+{
+    throw new InvalidOperationException(
+        "No MySQL connection. Local: copy .env.example to .env in the repo root, set DATABASE_URL (JawsDB mysql://…) "
+        + "and Jwt__SigningKey (32+ characters), then restart. Heroku: set Config Vars DATABASE_URL and Jwt__SigningKey.");
+}
+
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
     o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     // POST bodies from the SPA use camelCase; bind even if casing drifts.
     o.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
 });
-builder.Services.AddScoped<ProductRepository>();
 builder.Services.AddScoped<UserRepository>();
 builder.Services.AddScoped<ListingRepository>();
 builder.Services.AddScoped<TransactionRepository>();
@@ -82,12 +89,16 @@ builder.Services.AddCors(options =>
                     return true;
                 }
 
-                return origin.Equals("http://127.0.0.1:5500", StringComparison.OrdinalIgnoreCase) ||
-                       origin.Equals("http://localhost:5500", StringComparison.OrdinalIgnoreCase) ||
-                       origin.Equals("http://127.0.0.1:5147", StringComparison.OrdinalIgnoreCase) ||
-                       origin.Equals("http://localhost:5147", StringComparison.OrdinalIgnoreCase) ||
-                       origin.Equals("http://127.0.0.1:5148", StringComparison.OrdinalIgnoreCase) ||
-                       origin.Equals("http://localhost:5148", StringComparison.OrdinalIgnoreCase);
+                // Live Server / any local static server: port is often 5500 but can be 5501+, 3000, etc.
+                if (Uri.TryCreate(origin, UriKind.Absolute, out var local) &&
+                    string.Equals(local.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+                    (string.Equals(local.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(local.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+
+                return false;
             })
             .AllowAnyHeader()
             .AllowAnyMethod();
@@ -123,10 +134,21 @@ app.UseExceptionHandler(errorApp =>
             if (mx.ErrorCode == MySqlErrorCode.BadFieldError || mx.Number == 1054)
             {
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                var devHint = mx.Message.Contains("default_gap_solution", StringComparison.OrdinalIgnoreCase)
+                // lives_on_campus, phone, move_* live on `users` — the generic "listings" hint confuses people.
+                var devHint =
+                    mx.Message.Contains("default_gap_solution", StringComparison.OrdinalIgnoreCase)
                     || mx.Message.Contains("preferred_receive_gap", StringComparison.OrdinalIgnoreCase)
                     ? " For `users` gap columns: run database/alter_users_default_gap_solution.sql and database/alter_users_preferred_receive_gap.sql."
-                    : " Apply database scripts (e.g. database/alter_listings_fulfillment.sql, alter_listings_condition_dimensions.sql) so `listings` columns match the API.";
+                    : mx.Message.Contains("display_name", StringComparison.OrdinalIgnoreCase)
+                    || mx.Message.Contains("lives_on_campus", StringComparison.OrdinalIgnoreCase)
+                    || mx.Message.Contains("move_in_date", StringComparison.OrdinalIgnoreCase)
+                    || mx.Message.Contains("dorm_building", StringComparison.OrdinalIgnoreCase)
+                    || mx.Message.Contains("phone", StringComparison.OrdinalIgnoreCase)
+                    ? " For `users`: run database/catchup_api_schema_idempotent.sql (or database/alter_users_display_name.sql for display_name only)."
+                    : mx.Message.Contains("listings", StringComparison.OrdinalIgnoreCase)
+                    || mx.Message.Contains("listing", StringComparison.OrdinalIgnoreCase)
+                    ? " Run database/catchup_api_schema_idempotent.sql first (idempotent). If it still errors, add listing columns from database/alter_listings_fulfillment.sql, database/alter_listings_condition_dimensions.sql, etc."
+                    : " Run database/catchup_api_schema_idempotent.sql on your MySQL database (idempotent, syncs `users` + `listings` + related tables to this API).";
                 var detail = app.Environment.IsDevelopment()
                     ? $"[{mx.ErrorCode}] {mx.Message}{devHint}"
                     : "Database schema does not match the application.";

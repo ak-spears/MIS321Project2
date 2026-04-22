@@ -11,6 +11,10 @@ public sealed class CreateTransactionRequest
     /// <summary>cash | card — in-app settlement is peer-to-peer; this is for record-keeping.</summary>
     [JsonPropertyName("paymentMethod")]
     public string PaymentMethod { get; set; } = "cash";
+
+    /// <summary>When the listing is Or Best Offer, the buyer’s agreed price (0 &lt; amount ≤ list price). Omit to use list price.</summary>
+    [JsonPropertyName("offeredAmount")]
+    public decimal? OfferedAmount { get; set; }
 }
 
 /// <summary>Buyer&apos;s transaction row for the Transactions UI.</summary>
@@ -45,6 +49,18 @@ public sealed class TransactionListItemDto
 
     /// <summary>Seller has confirmed the handoff/pickup is done.</summary>
     public bool SellerConfirmed { get; init; }
+
+    /// <summary>Current listing &quot;ask&quot; (from <c>listings.price</c>) for OBO context.</summary>
+    [JsonPropertyName("listingListPrice")]
+    public decimal ListingListPrice { get; init; }
+
+    /// <summary>Whether the listing was Or Best Offer at read time (from <c>listings.or_best_offer</c>).</summary>
+    [JsonPropertyName("listingOrBestOffer")]
+    public bool ListingOrBestOffer { get; init; }
+
+    /// <summary>Seller acknowledged the below-list OBO price on the transaction.</summary>
+    [JsonPropertyName("oboSellerAcknowledged")]
+    public bool OboSellerAcknowledged { get; init; }
 }
 
 public sealed class MoveTransactionToDonationResponse

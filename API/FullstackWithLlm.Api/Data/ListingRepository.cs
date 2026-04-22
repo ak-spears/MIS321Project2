@@ -87,7 +87,7 @@ public sealed class ListingRepository
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
-            WHERE l.status IN ('active', 'claimed')
+            WHERE l.status = 'active'
               AND l.price > 0
               AND l.image_url IS NOT NULL
               AND TRIM(l.image_url) <> ''
@@ -135,7 +135,7 @@ public sealed class ListingRepository
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
-            WHERE l.status IN ('active', 'claimed')
+            WHERE l.status = 'active'
               AND l.price > 0
               AND l.image_url IS NOT NULL
               AND TRIM(l.image_url) <> ''
@@ -161,7 +161,7 @@ public sealed class ListingRepository
                 SUBSTRING_INDEX(LOWER(TRIM(COALESCE(u.email, ''))), '@', 1) AS seller_display_name
             FROM listings l
             INNER JOIN users u ON u.user_id = l.seller_id
-            WHERE l.status IN ('active', 'claimed')
+            WHERE l.status = 'active'
               AND l.price > 0
               AND (@campus_id IS NULL OR l.campus_id = @campus_id)
               AND (@exclude_seller_id IS NULL OR l.seller_id <> @exclude_seller_id)
