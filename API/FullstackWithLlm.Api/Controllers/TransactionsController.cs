@@ -144,7 +144,7 @@ public sealed class TransactionsController : ControllerBase
         if (row is null)
         {
             return Conflict(
-                "That sale cannot be completed until both you and the seller mark pickup and handoff done, the transaction is pending and yours, and the listing is still claimed.");
+                "That sale cannot be completed (not pending, not your purchase, or the listing is not in a claimed state).");
         }
 
         return Ok(row);

@@ -77,62 +77,364 @@ public sealed class TransactionRepository
         _connectionString = connectionString;
     }
 
-    public async Task<IReadOnlyList<TransactionListItemDto>> GetMineAsBuyerAsync(
+    private static MySqlException? AsMySqlException(Exception ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is MySqlException mx)
+            {
+                return mx;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsUnknownColumnError(MySqlException ex) =>
+        ex.ErrorCode == MySqlErrorCode.BadFieldError || ex.Number == 1054;
+
+    private const string MineAsBuyerSqlWithHandshake = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.buyer_id,
+            t.seller_id,
+            t.buyer_confirmed_at,
+            t.seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.seller_id)
+            ) AS seller_display_name,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ratings r
+                    WHERE r.listing_id = t.listing_id
+                      AND r.rater_id = t.buyer_id
+                      AND r.ratee_id = t.seller_id
+                ) THEN 1
+                ELSE 0
+            END AS has_rating,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users su ON su.user_id = t.seller_id
+        WHERE t.buyer_id = @buyer_id
+        ORDER BY t.created_at DESC
+        LIMIT @limit;
+        """;
+
+    private const string MineAsBuyerSqlHandshakeNull = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.buyer_id,
+            t.seller_id,
+            NULL AS buyer_confirmed_at,
+            NULL AS seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.seller_id)
+            ) AS seller_display_name,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ratings r
+                    WHERE r.listing_id = t.listing_id
+                      AND r.rater_id = t.buyer_id
+                      AND r.ratee_id = t.seller_id
+                ) THEN 1
+                ELSE 0
+            END AS has_rating,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users su ON su.user_id = t.seller_id
+        WHERE t.buyer_id = @buyer_id
+        ORDER BY t.created_at DESC
+        LIMIT @limit;
+        """;
+
+    /// <summary>Oldest DBs: no <c>obo_seller_ack</c> column — expose constant 0 under same result alias.</summary>
+    private const string MineAsBuyerSqlLegacyNoOboAck = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.buyer_id,
+            t.seller_id,
+            NULL AS buyer_confirmed_at,
+            NULL AS seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.seller_id)
+            ) AS seller_display_name,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ratings r
+                    WHERE r.listing_id = t.listing_id
+                      AND r.rater_id = t.buyer_id
+                      AND r.ratee_id = t.seller_id
+                ) THEN 1
+                ELSE 0
+            END AS has_rating,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            0 AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users su ON su.user_id = t.seller_id
+        WHERE t.buyer_id = @buyer_id
+        ORDER BY t.created_at DESC
+        LIMIT @limit;
+        """;
+
+    private const string MineAsSellerSqlWithHandshake = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.seller_id,
+            t.buyer_id,
+            t.buyer_confirmed_at,
+            t.seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(b.email, ''))), '@', 1)), ''),
+                '(buyer)'
+            ) AS buyer_display_name,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users b ON b.user_id = t.buyer_id
+        WHERE t.seller_id = @seller_id
+        ORDER BY t.created_at DESC
+        LIMIT @limit;
+        """;
+
+    private const string MineAsSellerSqlHandshakeNull = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.seller_id,
+            t.buyer_id,
+            NULL AS buyer_confirmed_at,
+            NULL AS seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(b.email, ''))), '@', 1)), ''),
+                '(buyer)'
+            ) AS buyer_display_name,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users b ON b.user_id = t.buyer_id
+        WHERE t.seller_id = @seller_id
+        ORDER BY t.created_at DESC
+        LIMIT @limit;
+        """;
+
+    private const string MineAsSellerSqlLegacyNoOboAck = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.seller_id,
+            t.buyer_id,
+            NULL AS buyer_confirmed_at,
+            NULL AS seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(b.email, ''))), '@', 1)), ''),
+                '(buyer)'
+            ) AS buyer_display_name,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            0 AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users b ON b.user_id = t.buyer_id
+        WHERE t.seller_id = @seller_id
+        ORDER BY t.created_at DESC
+        LIMIT @limit;
+        """;
+
+    private const string ReadParticipantSqlWithHandshake = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.buyer_id,
+            t.seller_id,
+            t.buyer_confirmed_at,
+            t.seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.seller_id)
+            ) AS seller_display_name,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(bu.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.buyer_id)
+            ) AS buyer_display_name,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ratings r
+                    WHERE r.listing_id = t.listing_id
+                      AND r.rater_id = t.buyer_id
+                      AND r.ratee_id = t.seller_id
+                ) THEN 1
+                ELSE 0
+            END AS has_rating,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users su ON su.user_id = t.seller_id
+        LEFT JOIN users bu ON bu.user_id = t.buyer_id
+        WHERE t.transaction_id = @tid
+          AND (t.buyer_id = @uid OR t.seller_id = @uid);
+        """;
+
+    private const string ReadParticipantSqlHandshakeNull = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.buyer_id,
+            t.seller_id,
+            NULL AS buyer_confirmed_at,
+            NULL AS seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.seller_id)
+            ) AS seller_display_name,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(bu.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.buyer_id)
+            ) AS buyer_display_name,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ratings r
+                    WHERE r.listing_id = t.listing_id
+                      AND r.rater_id = t.buyer_id
+                      AND r.ratee_id = t.seller_id
+                ) THEN 1
+                ELSE 0
+            END AS has_rating,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users su ON su.user_id = t.seller_id
+        LEFT JOIN users bu ON bu.user_id = t.buyer_id
+        WHERE t.transaction_id = @tid
+          AND (t.buyer_id = @uid OR t.seller_id = @uid);
+        """;
+
+    private const string ReadParticipantSqlLegacyNoOboAck = """
+        SELECT
+            t.transaction_id,
+            t.listing_id,
+            COALESCE(l.title, '(listing unavailable)') AS title,
+            t.amount,
+            t.platform_fee,
+            t.payment_method,
+            t.status,
+            t.created_at,
+            t.buyer_id,
+            t.seller_id,
+            NULL AS buyer_confirmed_at,
+            NULL AS seller_confirmed_at,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.seller_id)
+            ) AS seller_display_name,
+            COALESCE(
+                NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(bu.email, ''))), '@', 1)), ''),
+                CONCAT('User #', t.buyer_id)
+            ) AS buyer_display_name,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ratings r
+                    WHERE r.listing_id = t.listing_id
+                      AND r.rater_id = t.buyer_id
+                      AND r.ratee_id = t.seller_id
+                ) THEN 1
+                ELSE 0
+            END AS has_rating,
+            COALESCE(l.price, 0) AS listing_list_price,
+            COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+            0 AS obo_seller_ack
+        FROM transactions t
+        LEFT JOIN listings l ON l.listing_id = t.listing_id
+        LEFT JOIN users su ON su.user_id = t.seller_id
+        LEFT JOIN users bu ON bu.user_id = t.buyer_id
+        WHERE t.transaction_id = @tid
+          AND (t.buyer_id = @uid OR t.seller_id = @uid);
+        """;
+
+    private static async Task<IReadOnlyList<TransactionListItemDto>> QueryMineAsBuyerAsync(
+        string connectionString,
+        string sql,
         int buyerId,
         int limit,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken)
     {
-        if (limit < 1)
-        {
-            limit = 48;
-        }
-
-        if (limit > 200)
-        {
-            limit = 200;
-        }
-
-        // LEFT JOIN so a transaction row still appears if the listing row was removed (INNER JOIN hid rows).
-        const string sql = """
-            SELECT
-                t.transaction_id,
-                t.listing_id,
-                COALESCE(l.title, '(listing unavailable)') AS title,
-                t.amount,
-                t.platform_fee,
-                t.payment_method,
-                t.status,
-                t.created_at,
-                t.buyer_id,
-                t.seller_id,
-                t.buyer_confirmed_at,
-                t.seller_confirmed_at,
-                COALESCE(
-                    NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
-                    CONCAT('User #', t.seller_id)
-                ) AS seller_display_name,
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM ratings r
-                        WHERE r.listing_id = t.listing_id
-                          AND r.rater_id = t.buyer_id
-                          AND r.ratee_id = t.seller_id
-                    ) THEN 1
-                    ELSE 0
-                END AS has_rating,
-                COALESCE(l.price, 0) AS listing_list_price,
-                COALESCE(l.or_best_offer, 0) AS listing_is_obo,
-                COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
-            FROM transactions t
-            LEFT JOIN listings l ON l.listing_id = t.listing_id
-            LEFT JOIN users su ON su.user_id = t.seller_id
-            WHERE t.buyer_id = @buyer_id
-            ORDER BY t.created_at DESC
-            LIMIT @limit;
-            """;
-
-        await using var conn = new MySqlConnection(_connectionString);
+        await using var conn = new MySqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = new MySqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@buyer_id", buyerId);
@@ -169,6 +471,130 @@ public sealed class TransactionRepository
         }
 
         return list;
+    }
+
+    private static async Task<IReadOnlyList<TransactionListItemDto>> QueryMineAsSellerAsync(
+        string connectionString,
+        string sql,
+        int sellerId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await using var conn = new MySqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@seller_id", sellerId);
+        cmd.Parameters.AddWithValue("@limit", limit);
+
+        var list = new List<TransactionListItemDto>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            list.Add(new TransactionListItemDto
+            {
+                TransactionId = reader.GetInt32(reader.GetOrdinal("transaction_id")),
+                ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
+                Title = reader.GetString(reader.GetOrdinal("title")),
+                Amount = reader.GetDecimal(reader.GetOrdinal("amount")),
+                PlatformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee")),
+                PaymentMethod = reader.GetString(reader.GetOrdinal("payment_method")),
+                Status = reader.GetString(reader.GetOrdinal("status")),
+                HasRating = false,
+                CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
+                SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
+                BuyerId = reader.GetInt32(reader.GetOrdinal("buyer_id")),
+                BuyerDisplayName = reader.GetString(reader.GetOrdinal("buyer_display_name")),
+                SellerDisplayName = null,
+                BuyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at")),
+                SellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at")),
+                ListingListPrice = reader.GetDecimal(reader.GetOrdinal("listing_list_price")),
+                ListingOrBestOffer = !reader.IsDBNull(reader.GetOrdinal("listing_is_obo"))
+                    && reader.GetInt32(reader.GetOrdinal("listing_is_obo")) == 1,
+                OboSellerAcknowledged = !reader.IsDBNull(reader.GetOrdinal("obo_seller_ack"))
+                    && reader.GetInt32(reader.GetOrdinal("obo_seller_ack")) == 1,
+            });
+        }
+
+        return list;
+    }
+
+    private static async Task<TransactionListItemDto?> QueryParticipantRowAsync(
+        string connectionString,
+        string sql,
+        int userId,
+        int transactionId,
+        CancellationToken cancellationToken)
+    {
+        await using var conn = new MySqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@tid", transactionId);
+        cmd.Parameters.AddWithValue("@uid", userId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new TransactionListItemDto
+        {
+            TransactionId = reader.GetInt32(reader.GetOrdinal("transaction_id")),
+            ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
+            Title = reader.GetString(reader.GetOrdinal("title")),
+            Amount = reader.GetDecimal(reader.GetOrdinal("amount")),
+            PlatformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee")),
+            PaymentMethod = reader.GetString(reader.GetOrdinal("payment_method")),
+            Status = reader.GetString(reader.GetOrdinal("status")),
+            HasRating = !reader.IsDBNull(reader.GetOrdinal("has_rating")) && reader.GetInt32(reader.GetOrdinal("has_rating")) == 1,
+            CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
+            BuyerId = reader.GetInt32(reader.GetOrdinal("buyer_id")),
+            SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
+            SellerDisplayName = reader.IsDBNull(reader.GetOrdinal("seller_display_name"))
+                ? null
+                : reader.GetString(reader.GetOrdinal("seller_display_name")),
+            BuyerDisplayName = reader.IsDBNull(reader.GetOrdinal("buyer_display_name"))
+                ? null
+                : reader.GetString(reader.GetOrdinal("buyer_display_name")),
+            BuyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at")),
+            SellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at")),
+            ListingListPrice = reader.GetDecimal(reader.GetOrdinal("listing_list_price")),
+            ListingOrBestOffer = !reader.IsDBNull(reader.GetOrdinal("listing_is_obo"))
+                && reader.GetInt32(reader.GetOrdinal("listing_is_obo")) == 1,
+            OboSellerAcknowledged = !reader.IsDBNull(reader.GetOrdinal("obo_seller_ack"))
+                && reader.GetInt32(reader.GetOrdinal("obo_seller_ack")) == 1,
+        };
+    }
+
+    public async Task<IReadOnlyList<TransactionListItemDto>> GetMineAsBuyerAsync(
+        int buyerId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit < 1)
+        {
+            limit = 48;
+        }
+
+        if (limit > 200)
+        {
+            limit = 200;
+        }
+
+        try
+        {
+            return await QueryMineAsBuyerAsync(_connectionString, MineAsBuyerSqlWithHandshake, buyerId, limit, cancellationToken);
+        }
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnError(mx))
+        {
+            try
+            {
+                return await QueryMineAsBuyerAsync(_connectionString, MineAsBuyerSqlHandshakeNull, buyerId, limit, cancellationToken);
+            }
+            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnError(mx2))
+            {
+                return await QueryMineAsBuyerAsync(_connectionString, MineAsBuyerSqlLegacyNoOboAck, buyerId, limit, cancellationToken);
+            }
+        }
     }
 
     /// <summary>Seller in-box: pending (claimed) sales only. Does not use <c>users.display_name</c> (email fallback).</summary>
@@ -251,71 +677,21 @@ public sealed class TransactionRepository
             limit = 200;
         }
 
-        const string sql = """
-            SELECT
-                t.transaction_id,
-                t.listing_id,
-                COALESCE(l.title, '(listing unavailable)') AS title,
-                t.amount,
-                t.platform_fee,
-                t.payment_method,
-                t.status,
-                t.created_at,
-                t.seller_id,
-                t.buyer_id,
-                t.buyer_confirmed_at,
-                t.seller_confirmed_at,
-                COALESCE(
-                    NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(b.email, ''))), '@', 1)), ''),
-                    '(buyer)'
-                ) AS buyer_display_name,
-                COALESCE(l.price, 0) AS listing_list_price,
-                COALESCE(l.or_best_offer, 0) AS listing_is_obo,
-                COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
-            FROM transactions t
-            LEFT JOIN listings l ON l.listing_id = t.listing_id
-            LEFT JOIN users b ON b.user_id = t.buyer_id
-            WHERE t.seller_id = @seller_id
-            ORDER BY t.created_at DESC
-            LIMIT @limit;
-            """;
-
-        await using var conn = new MySqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = new MySqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@seller_id", sellerId);
-        cmd.Parameters.AddWithValue("@limit", limit);
-
-        var list = new List<TransactionListItemDto>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        try
         {
-            list.Add(new TransactionListItemDto
-            {
-                TransactionId = reader.GetInt32(reader.GetOrdinal("transaction_id")),
-                ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
-                Title = reader.GetString(reader.GetOrdinal("title")),
-                Amount = reader.GetDecimal(reader.GetOrdinal("amount")),
-                PlatformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee")),
-                PaymentMethod = reader.GetString(reader.GetOrdinal("payment_method")),
-                Status = reader.GetString(reader.GetOrdinal("status")),
-                HasRating = false,
-                CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
-                SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
-                BuyerId = reader.GetInt32(reader.GetOrdinal("buyer_id")),
-                BuyerDisplayName = reader.GetString(reader.GetOrdinal("buyer_display_name")),
-                SellerDisplayName = null,
-                BuyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at")),
-                SellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at")),
-                ListingListPrice = reader.GetDecimal(reader.GetOrdinal("listing_list_price")),
-                ListingOrBestOffer = !reader.IsDBNull(reader.GetOrdinal("listing_is_obo"))
-                    && reader.GetInt32(reader.GetOrdinal("listing_is_obo")) == 1,
-                OboSellerAcknowledged = !reader.IsDBNull(reader.GetOrdinal("obo_seller_ack"))
-                    && reader.GetInt32(reader.GetOrdinal("obo_seller_ack")) == 1,
-            });
+            return await QueryMineAsSellerAsync(_connectionString, MineAsSellerSqlWithHandshake, sellerId, limit, cancellationToken);
         }
-
-        return list;
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnError(mx))
+        {
+            try
+            {
+                return await QueryMineAsSellerAsync(_connectionString, MineAsSellerSqlHandshakeNull, sellerId, limit, cancellationToken);
+            }
+            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnError(mx2))
+            {
+                return await QueryMineAsSellerAsync(_connectionString, MineAsSellerSqlLegacyNoOboAck, sellerId, limit, cancellationToken);
+            }
+        }
     }
 
     /// <summary>
@@ -504,6 +880,7 @@ public sealed class TransactionRepository
     /// <summary>
     /// Marks a pending transaction completed (buyer received item) and flips listing from claimed → sold.
     /// Returns null if the transaction is not pending, not owned by buyer, or listing is not in claimed state.
+    /// Handoff confirmation columns, when present, are read for display only — completion does not wait on both sides.
     /// </summary>
     public async Task<TransactionListItemDto?> CompleteOnReceiptAsync(
         int buyerId,
@@ -521,7 +898,7 @@ public sealed class TransactionRepository
 
         try
         {
-            const string selectTxSql = """
+            const string selectTxSqlWithHandshake = """
                 SELECT
                     t.transaction_id,
                     t.listing_id,
@@ -543,6 +920,73 @@ public sealed class TransactionRepository
                 FOR UPDATE;
                 """;
 
+            /// <summary>Handshake columns present but <c>obo_seller_ack</c> missing on older DBs.</summary>
+            const string selectTxSqlHandshakeOboAsZero = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.amount,
+                    t.platform_fee,
+                    t.payment_method,
+                    t.status,
+                    t.created_at,
+                    t.buyer_confirmed_at,
+                    t.seller_confirmed_at,
+                    COALESCE(l.title, '(listing unavailable)') AS title,
+                    COALESCE(l.status, '') AS listing_status,
+                    COALESCE(l.price, 0) AS listing_list_price,
+                    COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+                    0 AS obo_seller_ack
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                WHERE t.transaction_id = @tid AND t.buyer_id = @buyer
+                FOR UPDATE;
+                """;
+
+            const string selectTxSqlHandshakeNull = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.amount,
+                    t.platform_fee,
+                    t.payment_method,
+                    t.status,
+                    t.created_at,
+                    NULL AS buyer_confirmed_at,
+                    NULL AS seller_confirmed_at,
+                    COALESCE(l.title, '(listing unavailable)') AS title,
+                    COALESCE(l.status, '') AS listing_status,
+                    COALESCE(l.price, 0) AS listing_list_price,
+                    COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+                    COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                WHERE t.transaction_id = @tid AND t.buyer_id = @buyer
+                FOR UPDATE;
+                """;
+
+            const string selectTxSqlLegacyNoObo = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.amount,
+                    t.platform_fee,
+                    t.payment_method,
+                    t.status,
+                    t.created_at,
+                    NULL AS buyer_confirmed_at,
+                    NULL AS seller_confirmed_at,
+                    COALESCE(l.title, '(listing unavailable)') AS title,
+                    COALESCE(l.status, '') AS listing_status,
+                    COALESCE(l.price, 0) AS listing_list_price,
+                    COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+                    0 AS obo_seller_ack
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                WHERE t.transaction_id = @tid AND t.buyer_id = @buyer
+                FOR UPDATE;
+                """;
+
             int listingId;
             string status;
             string title;
@@ -551,45 +995,129 @@ public sealed class TransactionRepository
             decimal platformFee;
             string paymentMethod;
             DateTime createdAt;
-            var hasBothConfirmations = false;
             decimal listingListPriceO = 0m;
             var listingOrBestOfferO = false;
             var oboSellerAcknowledgedO = false;
 
-            await using (var selectCmd = new MySqlCommand(selectTxSql, conn, dbTx))
+            try
             {
-                selectCmd.Parameters.AddWithValue("@tid", transactionId);
-                selectCmd.Parameters.AddWithValue("@buyer", buyerId);
-                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
+                await using (var selectCmd = new MySqlCommand(selectTxSqlWithHandshake, conn, dbTx))
                 {
-                    await dbTx.RollbackAsync(cancellationToken);
-                    return null;
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@buyer", buyerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
+
+                    listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                    paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                    title = reader.GetString(reader.GetOrdinal("title"));
+                    listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                    listingListPriceO = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                    var oOrd = reader.GetOrdinal("listing_is_obo");
+                    listingOrBestOfferO = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    var aOrd = reader.GetOrdinal("obo_seller_ack");
+                    oboSellerAcknowledgedO = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
+                    await reader.CloseAsync();
                 }
-
-                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
-                amount = reader.GetDecimal(reader.GetOrdinal("amount"));
-                platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
-                paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
-                status = reader.GetString(reader.GetOrdinal("status"));
-                createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
-                title = reader.GetString(reader.GetOrdinal("title"));
-                listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
-                var bOrd = reader.GetOrdinal("buyer_confirmed_at");
-                var sOrd = reader.GetOrdinal("seller_confirmed_at");
-                hasBothConfirmations = !reader.IsDBNull(bOrd) && !reader.IsDBNull(sOrd);
-                listingListPriceO = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
-                var oOrd = reader.GetOrdinal("listing_is_obo");
-                listingOrBestOfferO = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
-                var aOrd = reader.GetOrdinal("obo_seller_ack");
-                oboSellerAcknowledgedO = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
-                await reader.CloseAsync();
             }
-
-            if (!hasBothConfirmations)
+            catch (MySqlException mx) when (IsUnknownColumnError(mx))
             {
-                await dbTx.RollbackAsync(cancellationToken);
-                return null;
+                try
+                {
+                    await using (var selectCmd = new MySqlCommand(selectTxSqlHandshakeOboAsZero, conn, dbTx))
+                    {
+                        selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                        selectCmd.Parameters.AddWithValue("@buyer", buyerId);
+                        await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                        if (!await reader.ReadAsync(cancellationToken))
+                        {
+                            await dbTx.RollbackAsync(cancellationToken);
+                            return null;
+                        }
+
+                        listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                        amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                        platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                        paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                        status = reader.GetString(reader.GetOrdinal("status"));
+                        createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                        title = reader.GetString(reader.GetOrdinal("title"));
+                        listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                        listingListPriceO = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                        var oOrd = reader.GetOrdinal("listing_is_obo");
+                        listingOrBestOfferO = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                        oboSellerAcknowledgedO = false;
+                        await reader.CloseAsync();
+                    }
+                }
+                catch (MySqlException mxObo) when (IsUnknownColumnError(mxObo))
+                {
+                    try
+                    {
+                        await using (var selectCmd = new MySqlCommand(selectTxSqlHandshakeNull, conn, dbTx))
+                        {
+                            selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                            selectCmd.Parameters.AddWithValue("@buyer", buyerId);
+                            await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                            if (!await reader.ReadAsync(cancellationToken))
+                            {
+                                await dbTx.RollbackAsync(cancellationToken);
+                                return null;
+                            }
+
+                            listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                            amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                            platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                            paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                            status = reader.GetString(reader.GetOrdinal("status"));
+                            createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                            title = reader.GetString(reader.GetOrdinal("title"));
+                            listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                            listingListPriceO = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                            var oOrd = reader.GetOrdinal("listing_is_obo");
+                            listingOrBestOfferO = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                            var aOrd = reader.GetOrdinal("obo_seller_ack");
+                            oboSellerAcknowledgedO = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
+                            await reader.CloseAsync();
+                        }
+                    }
+                    catch (MySqlException mx2) when (IsUnknownColumnError(mx2))
+                    {
+                        await using (var selectCmd = new MySqlCommand(selectTxSqlLegacyNoObo, conn, dbTx))
+                        {
+                            selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                            selectCmd.Parameters.AddWithValue("@buyer", buyerId);
+                            await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                            if (!await reader.ReadAsync(cancellationToken))
+                            {
+                                await dbTx.RollbackAsync(cancellationToken);
+                                return null;
+                            }
+
+                            listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                            amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                            platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                            paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                            status = reader.GetString(reader.GetOrdinal("status"));
+                            createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                            title = reader.GetString(reader.GetOrdinal("title"));
+                            listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                            listingListPriceO = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                            var oOrd = reader.GetOrdinal("listing_is_obo");
+                            listingOrBestOfferO = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                            oboSellerAcknowledgedO = false;
+                            await reader.CloseAsync();
+                        }
+                    }
+                }
             }
 
             if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase))
@@ -699,6 +1227,26 @@ public sealed class TransactionRepository
                 FOR UPDATE;
                 """;
 
+            const string selectTxSqlNoOboAck = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.amount,
+                    t.platform_fee,
+                    t.payment_method,
+                    t.status,
+                    t.created_at,
+                    COALESCE(l.title, '(listing unavailable)') AS title,
+                    COALESCE(l.status, '') AS listing_status,
+                    COALESCE(l.price, 0) AS listing_list_price,
+                    COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+                    0 AS obo_seller_ack
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                WHERE t.transaction_id = @tid AND t.buyer_id = @buyer
+                FOR UPDATE;
+                """;
+
             int listingId;
             string status;
             string title;
@@ -711,31 +1259,62 @@ public sealed class TransactionRepository
             var listingOrBestOfferR = false;
             var oboSellerAcknowledgedR = false;
 
-            await using (var selectCmd = new MySqlCommand(selectTxSql, conn, dbTx))
+            try
             {
-                selectCmd.Parameters.AddWithValue("@tid", transactionId);
-                selectCmd.Parameters.AddWithValue("@buyer", buyerId);
-                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
+                await using (var selectCmd = new MySqlCommand(selectTxSql, conn, dbTx))
                 {
-                    await dbTx.RollbackAsync(cancellationToken);
-                    return null;
-                }
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@buyer", buyerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
 
-                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
-                amount = reader.GetDecimal(reader.GetOrdinal("amount"));
-                platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
-                paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
-                status = reader.GetString(reader.GetOrdinal("status"));
-                createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
-                title = reader.GetString(reader.GetOrdinal("title"));
-                listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
-                listingListPriceR = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
-                var oOrd = reader.GetOrdinal("listing_is_obo");
-                listingOrBestOfferR = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
-                var aOrd = reader.GetOrdinal("obo_seller_ack");
-                oboSellerAcknowledgedR = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
-                await reader.CloseAsync();
+                    listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                    paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                    title = reader.GetString(reader.GetOrdinal("title"));
+                    listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                    listingListPriceR = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                    var oOrd = reader.GetOrdinal("listing_is_obo");
+                    listingOrBestOfferR = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    var aOrd = reader.GetOrdinal("obo_seller_ack");
+                    oboSellerAcknowledgedR = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
+                    await reader.CloseAsync();
+                }
+            }
+            catch (MySqlException mx) when (IsUnknownColumnError(mx))
+            {
+                await using (var selectCmd = new MySqlCommand(selectTxSqlNoOboAck, conn, dbTx))
+                {
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@buyer", buyerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
+
+                    listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    platformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                    paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                    title = reader.GetString(reader.GetOrdinal("title"));
+                    listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                    listingListPriceR = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                    var oOrd = reader.GetOrdinal("listing_is_obo");
+                    listingOrBestOfferR = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    oboSellerAcknowledgedR = false;
+                    await reader.CloseAsync();
+                }
             }
 
             if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase))
@@ -881,11 +1460,19 @@ public sealed class TransactionRepository
                     SET buyer_confirmed_at = COALESCE(buyer_confirmed_at, UTC_TIMESTAMP(3))
                     WHERE transaction_id = @tid AND buyer_id = @uid AND status = 'pending';
                     """;
-                await using var cmd = new MySqlCommand(upd, conn, dbTx);
-                cmd.Parameters.AddWithValue("@tid", transactionId);
-                cmd.Parameters.AddWithValue("@uid", userId);
-                var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
-                if (n != 1)
+                try
+                {
+                    await using var cmd = new MySqlCommand(upd, conn, dbTx);
+                    cmd.Parameters.AddWithValue("@tid", transactionId);
+                    cmd.Parameters.AddWithValue("@uid", userId);
+                    var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
+                    if (n != 1)
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
+                }
+                catch (MySqlException mx) when (IsUnknownColumnError(mx))
                 {
                     await dbTx.RollbackAsync(cancellationToken);
                     return null;
@@ -898,11 +1485,19 @@ public sealed class TransactionRepository
                     SET seller_confirmed_at = COALESCE(seller_confirmed_at, UTC_TIMESTAMP(3))
                     WHERE transaction_id = @tid AND seller_id = @uid AND status = 'pending';
                     """;
-                await using var cmd = new MySqlCommand(upd, conn, dbTx);
-                cmd.Parameters.AddWithValue("@tid", transactionId);
-                cmd.Parameters.AddWithValue("@uid", userId);
-                var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
-                if (n != 1)
+                try
+                {
+                    await using var cmd = new MySqlCommand(upd, conn, dbTx);
+                    cmd.Parameters.AddWithValue("@tid", transactionId);
+                    cmd.Parameters.AddWithValue("@uid", userId);
+                    var n = await cmd.ExecuteNonQueryAsync(cancellationToken);
+                    if (n != 1)
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
+                }
+                catch (MySqlException mx) when (IsUnknownColumnError(mx))
                 {
                     await dbTx.RollbackAsync(cancellationToken);
                     return null;
@@ -1088,6 +1683,26 @@ public sealed class TransactionRepository
                 FOR UPDATE;
                 """;
 
+            const string selectTxSqlNoOboAck = """
+                SELECT
+                    t.transaction_id,
+                    t.listing_id,
+                    t.amount,
+                    t.platform_fee,
+                    t.payment_method,
+                    t.status,
+                    t.created_at,
+                    COALESCE(l.title, '(listing unavailable)') AS title,
+                    COALESCE(l.status, '') AS listing_status,
+                    COALESCE(l.price, 0) AS listing_list_price,
+                    COALESCE(l.or_best_offer, 0) AS listing_is_obo,
+                    0 AS obo_seller_ack
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                WHERE t.transaction_id = @tid AND t.seller_id = @sid
+                FOR UPDATE;
+                """;
+
             int listingId;
             string status;
             string title;
@@ -1099,31 +1714,62 @@ public sealed class TransactionRepository
             var listingOrBestOfferC = false;
             var oboSellerAcknowledgedC = false;
 
-            await using (var selectCmd = new MySqlCommand(selectTxSql, conn, dbTx))
+            try
             {
-                selectCmd.Parameters.AddWithValue("@tid", transactionId);
-                selectCmd.Parameters.AddWithValue("@sid", sellerId);
-                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
+                await using (var selectCmd = new MySqlCommand(selectTxSql, conn, dbTx))
                 {
-                    await dbTx.RollbackAsync(cancellationToken);
-                    return null;
-                }
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@sid", sellerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
 
-                listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
-                amount = reader.GetDecimal(reader.GetOrdinal("amount"));
-                _ = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
-                paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
-                status = reader.GetString(reader.GetOrdinal("status"));
-                createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
-                title = reader.GetString(reader.GetOrdinal("title"));
-                listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
-                listingListPriceC = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
-                var oOrd = reader.GetOrdinal("listing_is_obo");
-                listingOrBestOfferC = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
-                var aOrd = reader.GetOrdinal("obo_seller_ack");
-                oboSellerAcknowledgedC = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
-                await reader.CloseAsync();
+                    listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    _ = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                    paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                    title = reader.GetString(reader.GetOrdinal("title"));
+                    listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                    listingListPriceC = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                    var oOrd = reader.GetOrdinal("listing_is_obo");
+                    listingOrBestOfferC = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    var aOrd = reader.GetOrdinal("obo_seller_ack");
+                    oboSellerAcknowledgedC = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
+                    await reader.CloseAsync();
+                }
+            }
+            catch (MySqlException mx) when (IsUnknownColumnError(mx))
+            {
+                await using (var selectCmd = new MySqlCommand(selectTxSqlNoOboAck, conn, dbTx))
+                {
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@sid", sellerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
+
+                    listingId = reader.GetInt32(reader.GetOrdinal("listing_id"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    _ = reader.GetDecimal(reader.GetOrdinal("platform_fee"));
+                    paymentMethod = reader.GetString(reader.GetOrdinal("payment_method"));
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+                    title = reader.GetString(reader.GetOrdinal("title"));
+                    listingStatus = reader.GetString(reader.GetOrdinal("listing_status"));
+                    listingListPriceC = reader.GetDecimal(reader.GetOrdinal("listing_list_price"));
+                    var oOrd = reader.GetOrdinal("listing_is_obo");
+                    listingOrBestOfferC = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    oboSellerAcknowledgedC = false;
+                    await reader.CloseAsync();
+                }
             }
 
             if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase))
@@ -1245,31 +1891,69 @@ public sealed class TransactionRepository
                 FOR UPDATE;
                 """;
 
+            const string selectSqlNoOboAck = """
+                SELECT
+                    t.status,
+                    0 AS obo_seller_ack,
+                    COALESCE(l.or_best_offer, 0) AS l_obo,
+                    COALESCE(l.price, 0) AS list_price,
+                    t.amount
+                FROM transactions t
+                LEFT JOIN listings l ON l.listing_id = t.listing_id
+                WHERE t.transaction_id = @tid AND t.seller_id = @sid
+                FOR UPDATE;
+                """;
+
             string status;
             var oboAck = false;
             var lObo = false;
             decimal listPrice;
             decimal amount;
 
-            await using (var selectCmd = new MySqlCommand(selectSql, conn, dbTx))
+            try
             {
-                selectCmd.Parameters.AddWithValue("@tid", transactionId);
-                selectCmd.Parameters.AddWithValue("@sid", sellerId);
-                await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
+                await using (var selectCmd = new MySqlCommand(selectSql, conn, dbTx))
                 {
-                    await dbTx.RollbackAsync(cancellationToken);
-                    return null;
-                }
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@sid", sellerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
 
-                status = reader.GetString(reader.GetOrdinal("status"));
-                var aOrd = reader.GetOrdinal("obo_seller_ack");
-                oboAck = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
-                var oOrd = reader.GetOrdinal("l_obo");
-                lObo = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
-                listPrice = reader.GetDecimal(reader.GetOrdinal("list_price"));
-                amount = reader.GetDecimal(reader.GetOrdinal("amount"));
-                await reader.CloseAsync();
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    var aOrd = reader.GetOrdinal("obo_seller_ack");
+                    oboAck = !reader.IsDBNull(aOrd) && reader.GetInt32(aOrd) == 1;
+                    var oOrd = reader.GetOrdinal("l_obo");
+                    lObo = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    listPrice = reader.GetDecimal(reader.GetOrdinal("list_price"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    await reader.CloseAsync();
+                }
+            }
+            catch (MySqlException mx) when (IsUnknownColumnError(mx))
+            {
+                await using (var selectCmd = new MySqlCommand(selectSqlNoOboAck, conn, dbTx))
+                {
+                    selectCmd.Parameters.AddWithValue("@tid", transactionId);
+                    selectCmd.Parameters.AddWithValue("@sid", sellerId);
+                    await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
+
+                    status = reader.GetString(reader.GetOrdinal("status"));
+                    oboAck = false;
+                    var oOrd = reader.GetOrdinal("l_obo");
+                    lObo = !reader.IsDBNull(oOrd) && reader.GetInt32(oOrd) == 1;
+                    listPrice = reader.GetDecimal(reader.GetOrdinal("list_price"));
+                    amount = reader.GetDecimal(reader.GetOrdinal("amount"));
+                    await reader.CloseAsync();
+                }
             }
 
             if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase))
@@ -1308,16 +1992,24 @@ public sealed class TransactionRepository
                   AND COALESCE(t.obo_seller_ack, 0) = 0
                 """;
 
-            await using (var upd = new MySqlCommand(updateSql, conn, dbTx))
+            try
             {
-                upd.Parameters.AddWithValue("@tid", transactionId);
-                upd.Parameters.AddWithValue("@sid", sellerId);
-                var n = await upd.ExecuteNonQueryAsync(cancellationToken);
-                if (n != 1)
+                await using (var upd = new MySqlCommand(updateSql, conn, dbTx))
                 {
-                    await dbTx.RollbackAsync(cancellationToken);
-                    return null;
+                    upd.Parameters.AddWithValue("@tid", transactionId);
+                    upd.Parameters.AddWithValue("@sid", sellerId);
+                    var n = await upd.ExecuteNonQueryAsync(cancellationToken);
+                    if (n != 1)
+                    {
+                        await dbTx.RollbackAsync(cancellationToken);
+                        return null;
+                    }
                 }
+            }
+            catch (MySqlException mx) when (IsUnknownColumnError(mx))
+            {
+                await dbTx.RollbackAsync(cancellationToken);
+                return null;
             }
 
             await dbTx.CommitAsync(cancellationToken);
@@ -1336,87 +2028,21 @@ public sealed class TransactionRepository
         int transactionId,
         CancellationToken cancellationToken)
     {
-        const string sql = """
-            SELECT
-                t.transaction_id,
-                t.listing_id,
-                COALESCE(l.title, '(listing unavailable)') AS title,
-                t.amount,
-                t.platform_fee,
-                t.payment_method,
-                t.status,
-                t.created_at,
-                t.buyer_id,
-                t.seller_id,
-                t.buyer_confirmed_at,
-                t.seller_confirmed_at,
-                COALESCE(
-                    NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(su.email, ''))), '@', 1)), ''),
-                    CONCAT('User #', t.seller_id)
-                ) AS seller_display_name,
-                COALESCE(
-                    NULLIF(TRIM(SUBSTRING_INDEX(LOWER(TRIM(COALESCE(bu.email, ''))), '@', 1)), ''),
-                    CONCAT('User #', t.buyer_id)
-                ) AS buyer_display_name,
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM ratings r
-                        WHERE r.listing_id = t.listing_id
-                          AND r.rater_id = t.buyer_id
-                          AND r.ratee_id = t.seller_id
-                    ) THEN 1
-                    ELSE 0
-                END AS has_rating,
-                COALESCE(l.price, 0) AS listing_list_price,
-                COALESCE(l.or_best_offer, 0) AS listing_is_obo,
-                COALESCE(t.obo_seller_ack, 0) AS obo_seller_ack
-            FROM transactions t
-            LEFT JOIN listings l ON l.listing_id = t.listing_id
-            LEFT JOIN users su ON su.user_id = t.seller_id
-            LEFT JOIN users bu ON bu.user_id = t.buyer_id
-            WHERE t.transaction_id = @tid
-              AND (t.buyer_id = @uid OR t.seller_id = @uid);
-            """;
-
-        await using var conn = new MySqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = new MySqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@tid", transactionId);
-        cmd.Parameters.AddWithValue("@uid", userId);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+        try
         {
-            return null;
+            return await QueryParticipantRowAsync(_connectionString, ReadParticipantSqlWithHandshake, userId, transactionId, cancellationToken);
         }
-
-        return new TransactionListItemDto
+        catch (Exception ex) when (AsMySqlException(ex) is { } mx && IsUnknownColumnError(mx))
         {
-            TransactionId = reader.GetInt32(reader.GetOrdinal("transaction_id")),
-            ListingId = reader.GetInt32(reader.GetOrdinal("listing_id")),
-            Title = reader.GetString(reader.GetOrdinal("title")),
-            Amount = reader.GetDecimal(reader.GetOrdinal("amount")),
-            PlatformFee = reader.GetDecimal(reader.GetOrdinal("platform_fee")),
-            PaymentMethod = reader.GetString(reader.GetOrdinal("payment_method")),
-            Status = reader.GetString(reader.GetOrdinal("status")),
-            HasRating = !reader.IsDBNull(reader.GetOrdinal("has_rating")) && reader.GetInt32(reader.GetOrdinal("has_rating")) == 1,
-            CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
-            BuyerId = reader.GetInt32(reader.GetOrdinal("buyer_id")),
-            SellerId = reader.GetInt32(reader.GetOrdinal("seller_id")),
-            SellerDisplayName = reader.IsDBNull(reader.GetOrdinal("seller_display_name"))
-                ? null
-                : reader.GetString(reader.GetOrdinal("seller_display_name")),
-            BuyerDisplayName = reader.IsDBNull(reader.GetOrdinal("buyer_display_name"))
-                ? null
-                : reader.GetString(reader.GetOrdinal("buyer_display_name")),
-            BuyerConfirmed = !reader.IsDBNull(reader.GetOrdinal("buyer_confirmed_at")),
-            SellerConfirmed = !reader.IsDBNull(reader.GetOrdinal("seller_confirmed_at")),
-            ListingListPrice = reader.GetDecimal(reader.GetOrdinal("listing_list_price")),
-            ListingOrBestOffer = !reader.IsDBNull(reader.GetOrdinal("listing_is_obo"))
-                && reader.GetInt32(reader.GetOrdinal("listing_is_obo")) == 1,
-            OboSellerAcknowledged = !reader.IsDBNull(reader.GetOrdinal("obo_seller_ack"))
-                && reader.GetInt32(reader.GetOrdinal("obo_seller_ack")) == 1,
-        };
+            try
+            {
+                return await QueryParticipantRowAsync(_connectionString, ReadParticipantSqlHandshakeNull, userId, transactionId, cancellationToken);
+            }
+            catch (Exception ex2) when (AsMySqlException(ex2) is { } mx2 && IsUnknownColumnError(mx2))
+            {
+                return await QueryParticipantRowAsync(_connectionString, ReadParticipantSqlLegacyNoOboAck, userId, transactionId, cancellationToken);
+            }
+        }
     }
 
     /// <summary>Total platform fees the seller still owes (completed sales, <c>fee_paid_at</c> not set).</summary>

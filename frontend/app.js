@@ -10547,16 +10547,20 @@ function renderTransactionsMounted(opts) {
                         : `<button type="button" class="btn btn-sm btn-outline-secondary rounded-pill" disabled title="Chat requires a live listing">Open chat</button>`;
                 const stLo = String(t.status).toLowerCase();
                 const bothDone = Boolean(t.buyerConfirmed) && Boolean(t.sellerConfirmed);
+                // POST /complete is buyer-only; sellers cannot advance paid sales here.
                 const advanceDisabled =
-                    stLo === "completed" || stLo === "cancelled" || (Boolean(t.fromServer) && isPending && !bothDone);
+                    stLo === "completed" ||
+                    stLo === "cancelled" ||
+                    (Boolean(t.fromServer) && isPurchase && isSellerView) ||
+                    (Boolean(t.fromServer) && isPending && !bothDone && isSellerView && isPurchase);
                 const advanceTitle =
                     stLo === "completed" || stLo === "cancelled"
                         ? stLo === "cancelled"
                             ? "This transaction is cancelled."
                             : "Already completed."
-                        : t.fromServer && isPending && !bothDone
-                          ? "Both people must mark pickup and handoff done first."
-                          : "Mark this sale complete after pickup (listing becomes sold).";
+                        : isSellerView && isPurchase && t.fromServer
+                          ? "Only the buyer can mark this sold after they receive the item."
+                          : "Mark received / sold after pickup (listing leaves the feed).";
                 const advanceBtn =
                     !isPurchase || !t.fromServer
                         ? !isPurchase
@@ -10565,9 +10569,16 @@ function renderTransactionsMounted(opts) {
                         : `<button type="button" class="btn btn-sm btn-outline-dark rounded-pill" data-action="tx-advance" data-transaction-id="${escapeAttrForDoubleQuoted(String(t.transactionId ?? ""))}" ${advanceDisabled ? "disabled" : ""} title="${escapeAttrForDoubleQuoted(advanceTitle)}">Ready to advance (sold)</button>`;
                 const releaseStatus = String(t.status).toLowerCase();
                 const releaseDisabled = releaseStatus !== "pending" && releaseStatus !== "awaiting_chat";
+                const releaseTitle = releaseDisabled
+                    ? isPurchase
+                        ? "Only pending checkouts can be cancelled."
+                        : "Only pending claims can be released."
+                    : isPurchase
+                      ? "Cancel before pickup: ends this transaction and puts the listing back on the home feed."
+                      : "Release this claim and put the listing back on the home feed.";
                 const releaseBtn =
-                    !isPurchase && t.fromServer
-                        ? `<button type="button" class="btn btn-sm btn-outline-danger rounded-pill" data-action="tx-release" data-transaction-id="${escapeAttrForDoubleQuoted(String(t.transactionId ?? ""))}" ${releaseDisabled ? "disabled" : ""} title="${releaseDisabled ? "Only pending claims can be released." : "Release this claim and put the listing back on the home feed."}">Release claim</button>`
+                    !isSellerView && t.fromServer
+                        ? `<button type="button" class="btn btn-sm btn-outline-danger rounded-pill" data-action="tx-release" data-is-purchase="${isPurchase ? "1" : "0"}" data-transaction-id="${escapeAttrForDoubleQuoted(String(t.transactionId ?? ""))}" ${releaseDisabled ? "disabled" : ""} title="${escapeAttrForDoubleQuoted(releaseTitle)}">Release claim</button>`
                         : "";
                 const confirmMineBtn =
                     t.fromServer && isPending && (isSellerView ? !t.sellerConfirmed : !t.buyerConfirmed)
@@ -10869,7 +10880,12 @@ function renderTransactionsMounted(opts) {
                 navigateAuth("login");
                 return;
             }
-            const ok = confirm("Release this claim? The listing will go back to ACTIVE on the home feed.");
+            const isPurchase = btn.getAttribute("data-is-purchase") === "1";
+            const ok = confirm(
+                isPurchase
+                    ? "Cancel this purchase? The listing returns to ACTIVE on the home feed and this checkout ends in the app. Settle any payment with the seller off-app if you already paid."
+                    : "Release this claim? The listing will go back to ACTIVE on the home feed.",
+            );
             if (!ok) return;
             try {
                 btn.setAttribute("disabled", "true");
@@ -10879,12 +10895,12 @@ function renderTransactionsMounted(opts) {
                 });
                 if (!res.ok) {
                     const txt = await res.text().catch(() => "");
-                    alert(txt || `Could not release claim (${res.status}).`);
+                    alert(txt || `Could not ${isPurchase ? "cancel purchase" : "release claim"} (${res.status}).`);
                     return;
                 }
                 renderTransactions();
             } catch {
-                alert("Network error releasing claim.");
+                alert(isPurchase ? "Network error cancelling purchase." : "Network error releasing claim.");
             } finally {
                 btn.removeAttribute("disabled");
             }
